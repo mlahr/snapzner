@@ -1,0 +1,28 @@
+# Local configuration and secrets.
+config.yaml
+credentials.yaml
+.env
+.env.*
+
+# Build outputs.
+snapzner
+bin/
+dist/
+
+# Test and coverage artifacts.
+*.test
+coverage.out
+coverage.html
+
+# Runtime files.
+*.lock
+*.log
+
+# Temporary files.
+tmp/
+*.tmp
+
+# Editor and OS metadata.
+.DS_Store
+.idea/
+.vscode/

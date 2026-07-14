@@ -1,0 +1,61 @@
+version: 2
+
+project_name: snapzner
+
+builds:
+  - id: snapzner
+    main: .
+    binary: snapzner
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: tarball
+    ids:
+      - snapzner
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+      - config.example.yaml
+
+checksum:
+  name_template: checksums.txt
+
+nfpms:
+  - id: deb
+    package_name: snapzner
+    ids:
+      - snapzner
+    formats:
+      - deb
+    maintainer: Michael Lahr
+    description: Multi-project Hetzner Cloud snapshot backup and replay CLI.
+    homepage: https://github.com/mlahr/snapzner
+    license: MIT
+    section: admin
+    priority: optional
+    bindir: /usr/bin
+    contents:
+      - src: config.example.yaml
+        dst: /usr/share/doc/snapzner/config.example.yaml
+      - src: README.md
+        dst: /usr/share/doc/snapzner/README.md
+      - src: LICENSE
+        dst: /usr/share/doc/snapzner/copyright
+
+release:
+  github:
+    owner: mlahr
+    name: snapzner

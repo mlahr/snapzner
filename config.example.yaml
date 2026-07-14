@@ -1,0 +1,18 @@
+version: 1
+
+defaults:
+  label_selector: "AUTOBACKUP=true"
+  retention_label: "AUTOBACKUP.KEEP-LAST"
+  keep_last: 3
+  snapshot_name: "%name%-%timestamp%"
+  operation_timeout: 1h
+  project_concurrency: 4
+  server_concurrency: 4
+
+projects:
+  - name: production
+    include:
+      - "id:123456"
+      - "name:database"
+    exclude:
+      - "name:temporary"
