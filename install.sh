@@ -44,6 +44,7 @@ else
 fi
 
 tmp_dir="$(mktemp -d)"
+chmod 0755 "$tmp_dir"
 cleanup() { rm -rf "$tmp_dir"; }
 trap cleanup EXIT
 
