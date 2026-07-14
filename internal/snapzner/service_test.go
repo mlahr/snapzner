@@ -24,6 +24,46 @@ func TestRenderNameUsesUTCFields(t *testing.T) {
 	}
 }
 
+func TestSelectBackupServersStrictlyIntersectsConfiguredSelection(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/servers", func(w http.ResponseWriter, r *http.Request) {
+		var servers []schema.Server
+		switch {
+		case r.URL.Query().Get("label_selector") != "":
+			servers = []schema.Server{{ID: 1, Name: "database"}, {ID: 2, Name: "web"}}
+		case r.URL.Query().Get("name") == "database":
+			servers = []schema.Server{{ID: 1, Name: "database"}}
+		case r.URL.Query().Get("name") == "web":
+			servers = []schema.Server{{ID: 2, Name: "web"}}
+		}
+		writeJSON(t, w, map[string]any{
+			"servers": servers,
+			"meta":    map[string]any{"pagination": map[string]any{"page": 1, "last_page": 1}},
+		})
+	})
+	mux.HandleFunc("/servers/1", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, schema.ServerGetResponse{Server: schema.Server{ID: 1, Name: "database"}})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := hcloud.NewClient(hcloud.WithToken("test"), hcloud.WithEndpoint(server.URL))
+	svc := Service{
+		Project: "prod", Cloud: &Cloud{Client: client}, Timeout: time.Second,
+		Policy: config.Policy{LabelSelector: "AUTOBACKUP=true"},
+	}
+	project := config.Project{Name: "prod", Exclude: []string{"name:web"}}
+	selected, err := svc.SelectBackupServers(context.Background(), project, []string{"database", "1", "name:database", "id:1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selected) != 1 || selected[0].ID != 1 {
+		t.Fatalf("selected = %#v", selected)
+	}
+	if _, err := svc.SelectBackupServers(context.Background(), project, []string{"web"}); err == nil || !strings.Contains(err.Error(), "not selected by project configuration") {
+		t.Fatalf("ineligible server error = %v", err)
+	}
+}
+
 func TestPruneCandidatesKeepsNewestPrefix(t *testing.T) {
 	images := []*hcloud.Image{{ID: 3}, {ID: 2}, {ID: 1}}
 	policy := config.Policy{KeepMin: 1, KeepLast: 2}
@@ -205,6 +245,81 @@ func TestBackupCreatesManagedSnapshotBeforePruning(t *testing.T) {
 	}
 	if progress[2].ServerID != 1 || progress[3].Completed != 1 || progress[3].Total != 1 {
 		t.Fatalf("server progress = %#v, %#v", progress[2], progress[3])
+	}
+}
+
+func TestFilteredBackupSnapshotsOnlyRequestedServer(t *testing.T) {
+	var createdServerIDs []int64
+	var created schema.ServerActionCreateImageRequest
+	serverSchema := func(id int64, name string) schema.Server {
+		return schema.Server{
+			ID: id, Name: name, Status: "running", Labels: map[string]string{"AUTOBACKUP": "true"},
+			ServerType: schema.ServerType{ID: 2, Name: "cx22", Architecture: "x86"},
+			Location:   schema.Location{ID: 3, Name: "fsn1"},
+			PublicNet:  schema.ServerPublicNet{IPv4: schema.ServerPublicNetIPv4{ID: 4, IP: "192.0.2.1"}},
+		}
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/servers", func(w http.ResponseWriter, r *http.Request) {
+		servers := []schema.Server{}
+		if r.URL.Query().Get("label_selector") != "" {
+			servers = []schema.Server{serverSchema(1, "database"), serverSchema(2, "web")}
+		} else if r.URL.Query().Get("name") == "database" {
+			servers = []schema.Server{serverSchema(1, "database")}
+		}
+		writeJSON(t, w, map[string]any{
+			"servers": servers,
+			"meta":    map[string]any{"pagination": map[string]any{"page": 1, "last_page": 1}},
+		})
+	})
+	mux.HandleFunc("/firewalls", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, map[string]any{"firewalls": []schema.Firewall{}, "meta": map[string]any{"pagination": map[string]any{"page": 1, "last_page": 1}}})
+	})
+	mux.HandleFunc("/servers/1/actions/create_image", func(w http.ResponseWriter, r *http.Request) {
+		createdServerIDs = append(createdServerIDs, 1)
+		if err := json.NewDecoder(r.Body).Decode(&created); err != nil {
+			t.Error(err)
+		}
+		now := time.Now().UTC()
+		writeJSON(t, w, schema.ServerActionCreateImageResponse{
+			Action: schema.Action{ID: 10, Status: "success"},
+			Image:  schema.Image{ID: 20, Status: "available", Type: "snapshot", Created: &now, Labels: derefLabels(created.Labels)},
+		})
+	})
+	mux.HandleFunc("/servers/2/actions/create_image", func(w http.ResponseWriter, _ *http.Request) {
+		createdServerIDs = append(createdServerIDs, 2)
+		http.Error(w, "unexpected server", http.StatusInternalServerError)
+	})
+	mux.HandleFunc("/images", func(w http.ResponseWriter, _ *http.Request) {
+		now := time.Now().UTC()
+		writeJSON(t, w, map[string]any{
+			"images": []schema.Image{{ID: 20, Status: "available", Type: "snapshot", Created: &now, Labels: derefLabels(created.Labels)}},
+			"meta":   map[string]any{"pagination": map[string]any{"page": 1, "last_page": 1}},
+		})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := hcloud.NewClient(hcloud.WithToken("test"), hcloud.WithEndpoint(server.URL), hcloud.WithPollOpts(hcloud.PollOpts{BackoffFunc: hcloud.ConstantBackoff(time.Millisecond)}))
+	svc := Service{
+		Project: "prod", Cloud: &Cloud{Client: client},
+		Policy: config.Policy{
+			LabelSelector: "AUTOBACKUP=true", RetentionLabel: "AUTOBACKUP.KEEP-LAST",
+			KeepLast: 3, SnapshotName: "%name%-%timestamp%",
+		},
+		Timeout: time.Second, ServerConcurrency: 2,
+	}
+	servers, err := svc.SelectBackupServers(context.Background(), config.Project{Name: "prod"}, []string{"database"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := svc.BackupServers(context.Background(), servers)
+	for _, event := range events {
+		if event.Error != "" {
+			t.Fatalf("event failed: %+v", event)
+		}
+	}
+	if len(createdServerIDs) != 1 || createdServerIDs[0] != 1 {
+		t.Fatalf("created snapshots for servers %v", createdServerIDs)
 	}
 }
 

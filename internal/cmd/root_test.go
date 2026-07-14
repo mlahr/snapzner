@@ -29,6 +29,7 @@ func TestSnapshotAndProtectionFlags(t *testing.T) {
 	}{
 		{[]string{"snapshots", "list"}, "all"},
 		{[]string{"snapshots", "delete"}, "force"},
+		{[]string{"backup"}, "server"},
 		{[]string{"prune"}, "force"},
 		{[]string{"replay", "rebuild"}, "force"},
 	}

@@ -112,7 +112,12 @@ func (a *app) projectsCommand() *cobra.Command {
 }
 
 func (a *app) backupCommand() *cobra.Command {
-	return &cobra.Command{Use: "backup", Short: "Create snapshots and enforce retention", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	var servers []string
+	command := &cobra.Command{Use: "backup", Short: "Create snapshots and enforce retention", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		targets, projectNames, err := parseBackupTargets(servers, a.projects)
+		if err != nil {
+			return err
+		}
 		unlock, err := a.lock()
 		if err != nil {
 			return err
@@ -120,11 +125,16 @@ func (a *app) backupCommand() *cobra.Command {
 		defer unlock()
 		progress := newBackupProgressRenderer(a.errOut, a.quiet)
 		defer progress.Close()
+		if len(servers) > 0 {
+			return a.runFilteredBackup(cmd.Context(), projectNames, targets, progress.Report)
+		}
 		return a.runProjects(cmd.Context(), func(ctx context.Context, svc *snapzner.Service, p config.Project) []snapzner.Event {
 			svc.OnProgress = progress.Report
 			return svc.Backup(ctx, p)
 		})
 	}}
+	command.Flags().StringArrayVar(&servers, "server", nil, "server name or ID to back up, optionally PROJECT/SERVER (repeatable)")
+	return command
 }
 
 func (a *app) pruneCommand() *cobra.Command {
@@ -288,12 +298,11 @@ func (a *app) runProjects(ctx context.Context, fn func(context.Context, *snapzne
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			token, err := store.Token(p.Name)
+			svc, err := a.serviceForProject(cfg, store, p)
 			if err != nil {
 				results <- []snapzner.Event{{Project: p.Name, Operation: "project", Message: "credential unavailable", Error: err.Error()}}
 				return
 			}
-			svc := &snapzner.Service{Project: p.Name, Cloud: snapzner.NewCloud(token, a.version), Policy: cfg.Policy(), Timeout: cfg.Defaults.OperationTimeout, ServerConcurrency: cfg.Defaults.ServerConcurrency}
 			results <- fn(ctx, svc, p)
 		}()
 	}
@@ -309,6 +318,21 @@ func (a *app) runProjects(ctx context.Context, fn func(context.Context, *snapzne
 			events = append(events, event)
 		}
 	}
+	return a.finishEvents(events, failed)
+}
+
+func (a *app) serviceForProject(cfg config.Config, store credentials.Store, project config.Project) (*snapzner.Service, error) {
+	token, err := store.Token(project.Name)
+	if err != nil {
+		return nil, err
+	}
+	return &snapzner.Service{
+		Project: project.Name, Cloud: snapzner.NewCloud(token, a.version), Policy: cfg.Policy(),
+		Timeout: cfg.Defaults.OperationTimeout, ServerConcurrency: cfg.Defaults.ServerConcurrency,
+	}, nil
+}
+
+func (a *app) finishEvents(events []snapzner.Event, failed bool) error {
 	a.printEvents(events)
 	if failed {
 		return fmt.Errorf("one or more operations failed")

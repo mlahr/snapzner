@@ -68,10 +68,64 @@ func (s *Service) Backup(ctx context.Context, project config.Project) []Event {
 	ctx, cancel := context.WithTimeout(ctx, s.Timeout)
 	defer cancel()
 	s.progress("selecting servers", nil, 0, 0)
-	servers, err := s.Cloud.SelectedServers(ctx, s.Policy.LabelSelector, project.Include, project.Exclude)
+	servers, err := s.selectBackupServers(ctx, project, nil)
 	if err != nil {
 		return []Event{s.event("backup", 0, "server selection failed", err)}
 	}
+	return s.backupServers(ctx, servers)
+}
+
+// SelectBackupServers resolves and validates an exact per-run server filter
+// against the servers selected by the persisted project configuration. It
+// performs no mutations and is suitable for an all-project preflight.
+func (s *Service) SelectBackupServers(ctx context.Context, project config.Project, requested []string) ([]*hcloud.Server, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.Timeout)
+	defer cancel()
+	s.progress("selecting servers", nil, 0, 0)
+	return s.selectBackupServers(ctx, project, requested)
+}
+
+func (s *Service) selectBackupServers(ctx context.Context, project config.Project, requested []string) ([]*hcloud.Server, error) {
+	selected, err := s.Cloud.SelectedServers(ctx, s.Policy.LabelSelector, project.Include, project.Exclude)
+	if err != nil {
+		return nil, err
+	}
+	if len(requested) == 0 {
+		return selected, nil
+	}
+
+	eligible := make(map[int64]*hcloud.Server, len(selected))
+	for _, server := range selected {
+		eligible[server.ID] = server
+	}
+	targets := make(map[int64]*hcloud.Server, len(requested))
+	for _, value := range requested {
+		server, err := s.Cloud.ResolveServerValue(ctx, value)
+		if err != nil {
+			return nil, fmt.Errorf("requested server %q: %w", value, err)
+		}
+		configured, ok := eligible[server.ID]
+		if !ok {
+			return nil, fmt.Errorf("requested server %q (%s, id %d) is not selected by project configuration", value, server.Name, server.ID)
+		}
+		targets[server.ID] = configured
+	}
+	servers := make([]*hcloud.Server, 0, len(targets))
+	for _, server := range targets {
+		servers = append(servers, server)
+	}
+	sortServers(servers)
+	return servers, nil
+}
+
+// BackupServers creates snapshots for a prevalidated exact server list.
+func (s *Service) BackupServers(ctx context.Context, servers []*hcloud.Server) []Event {
+	ctx, cancel := context.WithTimeout(ctx, s.Timeout)
+	defer cancel()
+	return s.backupServers(ctx, servers)
+}
+
+func (s *Service) backupServers(ctx context.Context, servers []*hcloud.Server) []Event {
 	if len(servers) == 0 {
 		s.progress("no servers selected", nil, 0, 0)
 		return []Event{s.event("backup", 0, "no servers selected", nil)}

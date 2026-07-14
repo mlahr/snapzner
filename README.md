@@ -168,9 +168,37 @@ Back up selected projects:
 snapzner backup --project production --project staging
 ```
 
+Back up specific configured servers in one project by name or numeric ID:
+
+```sh
+snapzner backup --project production \
+  --server database \
+  --server 123456
+```
+
+For multiple projects, qualify each server with its project alias. When every
+server is qualified, the project list is derived from the values:
+
+```sh
+snapzner backup \
+  --server production/database \
+  --server staging/name:web \
+  --server staging/id:123456
+```
+
+`--server` is repeatable and accepts a name, numeric ID, `name:VALUE`, or
+`id:VALUE`. Unqualified values require exactly one `--project`. When qualified
+values and `--project` are combined, their project sets must match exactly. The
+filter is per-run and does not modify configuration. Every requested server
+must already belong to the project's effective configured selection; the flag
+cannot override an explicit exclusion. Snapzner validates all requested
+servers across all projects before creating any snapshot.
+
 After a server's new snapshot becomes available, `backup` enforces that
-server's retention. A failed snapshot never triggers automatic pruning for
-that server. While a backup is running, Snapzner reports server selection,
+server's retention. With `--server`, automatic retention is likewise limited
+to requested servers whose snapshots succeeded. A failed snapshot never
+triggers automatic pruning for that server. While a backup is running,
+Snapzner reports server selection,
 snapshot creation, completion counts, and retention progress on standard
 error. Snapshot creation uses an animated spinner when standard error is a
 terminal and plain progress lines when it is redirected. Final human-readable
