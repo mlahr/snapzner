@@ -15,7 +15,7 @@ import (
 )
 
 type Event struct {
-	Project    string `json:"project"`
+	Project    string `json:"project,omitempty"`
 	Operation  string `json:"operation"`
 	ResourceID int64  `json:"resource_id,omitempty"`
 	Message    string `json:"message"`

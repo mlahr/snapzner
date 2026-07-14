@@ -176,6 +176,19 @@ snapzner backup --project production \
   --server 123456
 ```
 
+Back up managed servers by ID without knowing their projects:
+
+```sh
+snapzner backup --server 123456 --server id:789012
+```
+
+When every unqualified `--server` value is a numeric ID and no `--project` is
+given, Snapzner searches the effective managed selection of every configured
+project. It groups matches by project before creating snapshots. IDs that are
+not selected by any configured project are reported and skipped successfully.
+Discovery or credential failures, and an ID matching more than one project,
+fail the complete preflight before any snapshot is created.
+
 For multiple projects, qualify each server with its project alias. When every
 server is qualified, the project list is derived from the values:
 
@@ -187,12 +200,14 @@ snapzner backup \
 ```
 
 `--server` is repeatable and accepts a name, numeric ID, `name:VALUE`, or
-`id:VALUE`. Unqualified values require exactly one `--project`. When qualified
-values and `--project` are combined, their project sets must match exactly. The
-filter is per-run and does not modify configuration. Every requested server
-must already belong to the project's effective configured selection; the flag
-cannot override an explicit exclusion. Snapzner validates all requested
-servers across all projects before creating any snapshot.
+`id:VALUE`. Unqualified names require exactly one `--project`; unqualified IDs
+without a project use the cross-project discovery behavior described above.
+When qualified values and `--project` are combined, their project sets must
+match exactly. The filter is per-run and does not modify configuration. Every
+requested project-scoped server must already belong to the project's effective
+configured selection; the flag cannot override an explicit exclusion.
+Snapzner validates all requested servers across all projects before creating
+any snapshot.
 
 After a server's new snapshot becomes available, `backup` enforces that
 server's retention. With `--server`, automatic retention is likewise limited

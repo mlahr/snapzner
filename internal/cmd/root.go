@@ -114,9 +114,17 @@ func (a *app) projectsCommand() *cobra.Command {
 func (a *app) backupCommand() *cobra.Command {
 	var servers []string
 	command := &cobra.Command{Use: "backup", Short: "Create snapshots and enforce retention", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		targets, projectNames, err := parseBackupTargets(servers, a.projects)
+		discoveredIDs, discover, err := parseDiscoveredServerIDs(servers, a.projects)
 		if err != nil {
 			return err
+		}
+		var targets map[string][]string
+		var projectNames []string
+		if !discover {
+			targets, projectNames, err = parseBackupTargets(servers, a.projects)
+			if err != nil {
+				return err
+			}
 		}
 		unlock, err := a.lock()
 		if err != nil {
@@ -125,6 +133,9 @@ func (a *app) backupCommand() *cobra.Command {
 		defer unlock()
 		progress := newBackupProgressRenderer(a.errOut, a.quiet)
 		defer progress.Close()
+		if discover {
+			return a.runDiscoveredIDBackup(cmd.Context(), discoveredIDs, progress.Report)
+		}
 		if len(servers) > 0 {
 			return a.runFilteredBackup(cmd.Context(), projectNames, targets, progress.Report)
 		}
@@ -133,7 +144,7 @@ func (a *app) backupCommand() *cobra.Command {
 			return svc.Backup(ctx, p)
 		})
 	}}
-	command.Flags().StringArrayVar(&servers, "server", nil, "server name or ID to back up, optionally PROJECT/SERVER (repeatable)")
+	command.Flags().StringArrayVar(&servers, "server", nil, "server name or ID to back up; unscoped IDs discover managed projects (repeatable)")
 	return command
 }
 
@@ -372,7 +383,10 @@ func (a *app) printEvents(events []snapzner.Event) {
 		if a.quiet && e.Error == "" {
 			continue
 		}
-		line := fmt.Sprintf("[%s] %s", e.Project, e.Message)
+		line := e.Message
+		if e.Project != "" {
+			line = fmt.Sprintf("[%s] %s", e.Project, line)
+		}
 		if e.ResourceID != 0 {
 			line += fmt.Sprintf(" (id=%d)", e.ResourceID)
 		}
