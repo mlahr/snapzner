@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,7 +30,12 @@ type Config struct {
 type Defaults struct {
 	LabelSelector       string        `yaml:"label_selector"`
 	RetentionLabel      string        `yaml:"retention_label"`
+	KeepMin             int           `yaml:"keep_min"`
 	KeepLast            int           `yaml:"keep_last"`
+	MinAge              time.Duration `yaml:"-"`
+	MinAgeRaw           string        `yaml:"min_age,omitempty"`
+	MaxAge              time.Duration `yaml:"-"`
+	MaxAgeRaw           string        `yaml:"max_age,omitempty"`
 	SnapshotName        string        `yaml:"snapshot_name"`
 	OperationTimeout    time.Duration `yaml:"-"`
 	OperationTimeoutRaw string        `yaml:"operation_timeout"`
@@ -46,11 +52,17 @@ type Project struct {
 type Policy struct {
 	LabelSelector  string
 	RetentionLabel string
+	KeepMin        int
 	KeepLast       int
+	MinAge         time.Duration
+	MaxAge         time.Duration
 	SnapshotName   string
 }
 
-var aliasPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$`)
+var (
+	aliasPattern                 = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$`)
+	retentionDurationPartPattern = regexp.MustCompile(`^(?:\d+(?:\.\d*)?|\.\d+)(?:ns|us|µs|μs|ms|s|m|h|d|w)`)
+)
 
 func Default() Config {
 	return Config{
@@ -58,6 +70,7 @@ func Default() Config {
 		Defaults: Defaults{
 			LabelSelector:       DefaultSelector,
 			RetentionLabel:      DefaultRetentionLabel,
+			KeepMin:             1,
 			KeepLast:            3,
 			SnapshotName:        DefaultSnapshotName,
 			OperationTimeout:    time.Hour,
@@ -121,6 +134,25 @@ func (c *Config) Validate() error {
 	if c.Defaults.KeepLast < 1 {
 		return fmt.Errorf("defaults.keep_last must be at least 1")
 	}
+	if c.Defaults.KeepMin < 1 {
+		return fmt.Errorf("defaults.keep_min must be at least 1")
+	}
+	if c.Defaults.KeepMin > c.Defaults.KeepLast {
+		return fmt.Errorf("defaults.keep_min cannot exceed defaults.keep_last")
+	}
+	minAge, err := ParseRetentionDuration(c.Defaults.MinAgeRaw)
+	if err != nil {
+		return fmt.Errorf("defaults.min_age must be zero or a valid retention duration: %w", err)
+	}
+	maxAge, err := ParseRetentionDuration(c.Defaults.MaxAgeRaw)
+	if err != nil {
+		return fmt.Errorf("defaults.max_age must be zero or a valid retention duration: %w", err)
+	}
+	if minAge > 0 && maxAge > 0 && minAge > maxAge {
+		return fmt.Errorf("defaults.min_age cannot exceed defaults.max_age")
+	}
+	c.Defaults.MinAge = minAge
+	c.Defaults.MaxAge = maxAge
 	if c.Defaults.SnapshotName == "" {
 		return fmt.Errorf("defaults.snapshot_name cannot be empty")
 	}
@@ -170,7 +202,58 @@ func ValidateServerRef(ref string) error {
 }
 
 func (c Config) Policy() Policy {
-	return Policy{c.Defaults.LabelSelector, c.Defaults.RetentionLabel, c.Defaults.KeepLast, c.Defaults.SnapshotName}
+	return Policy{
+		LabelSelector: c.Defaults.LabelSelector, RetentionLabel: c.Defaults.RetentionLabel,
+		KeepMin: c.Defaults.KeepMin, KeepLast: c.Defaults.KeepLast,
+		MinAge: c.Defaults.MinAge, MaxAge: c.Defaults.MaxAge, SnapshotName: c.Defaults.SnapshotName,
+	}
+}
+
+// ParseRetentionDuration parses a fixed elapsed duration. It follows Go's
+// duration syntax and additionally treats d as 24 hours and w as 168 hours.
+// An empty string or any zero duration disables the corresponding age bound.
+func ParseRetentionDuration(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "0" {
+		return 0, nil
+	}
+	remaining := value
+	var normalized strings.Builder
+	for remaining != "" {
+		part := retentionDurationPartPattern.FindString(remaining)
+		if part == "" {
+			return 0, fmt.Errorf("invalid duration %q", value)
+		}
+		remaining = remaining[len(part):]
+		unit := ""
+		number := part
+		for _, candidate := range []string{"ns", "us", "µs", "μs", "ms", "s", "m", "h", "d", "w"} {
+			if strings.HasSuffix(part, candidate) {
+				unit = candidate
+				number = strings.TrimSuffix(part, candidate)
+				break
+			}
+		}
+		if unit == "d" || unit == "w" {
+			amount, err := strconv.ParseFloat(number, 64)
+			if err != nil {
+				return 0, fmt.Errorf("invalid duration %q", value)
+			}
+			hours := 24.0
+			if unit == "w" {
+				hours = 168.0
+			}
+			normalized.WriteString(strconv.FormatFloat(amount*hours, 'f', -1, 64))
+			normalized.WriteByte('h')
+		} else {
+			normalized.WriteString(part)
+		}
+	}
+	duration, err := time.ParseDuration(normalized.String())
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration %q: %w", value, err)
+	}
+	return duration, nil
 }
 
 func ValidateProjectName(name string) error {

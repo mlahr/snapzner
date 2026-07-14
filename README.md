@@ -48,7 +48,7 @@ snapzner projects list
 
 The interactive wizard configures:
 
-- The global server label selector, retention label, snapshot count, and
+- The global server label selector, count- and age-based retention, and
   snapshot naming format.
 - Operation timeout and project/server concurrency.
 - Every Hetzner project and its API token.
@@ -91,7 +91,10 @@ version: 1
 defaults:
   label_selector: "AUTOBACKUP=true"
   retention_label: "AUTOBACKUP.KEEP-LAST"
+  keep_min: 1
   keep_last: 3
+  min_age: 24h
+  max_age: 30d
   snapshot_name: "%name%-%timestamp%"
   operation_timeout: 1h
   project_concurrency: 4
@@ -123,6 +126,30 @@ AUTOBACKUP.KEEP-LAST=7
 ```
 
 The value must be an integer of at least one.
+
+Retention is evaluated separately for each source server, with snapshots
+ordered newest first. Snapzner always retains `keep_min` snapshots. For every
+remaining snapshot, it deletes the snapshot when either:
+
+```text
+age >= max_age
+or
+position is outside keep_last and age >= min_age
+```
+
+An omitted or zero age disables that age bound. With a disabled `min_age`,
+snapshots outside `keep_last` are immediately eligible, preserving count-only
+retention. With a disabled `max_age`, age never overrides `keep_last`.
+
+For example, `keep_min: 1`, `keep_last: 3`, `min_age: 24h`, and `max_age: 30d`
+always retains the newest snapshot, retains snapshots two and three for at
+most 30 days, and deletes additional snapshots once they are at least 24 hours
+old. A per-server retention-label value overrides only `keep_last`; values
+below `keep_min` are clamped to `keep_min`.
+
+Age values are fixed elapsed durations. In addition to Go duration units,
+Snapzner accepts `d` as 24 hours and `w` as 168 hours, including composites
+such as `1w2d12h`.
 
 Snapshot names support `%project%`, `%id%`, `%name%`, `%timestamp%`, `%date%`,
 and `%time%`. Date and time placeholders use UTC.

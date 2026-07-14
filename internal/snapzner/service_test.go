@@ -26,12 +26,105 @@ func TestRenderNameUsesUTCFields(t *testing.T) {
 
 func TestPruneCandidatesKeepsNewestPrefix(t *testing.T) {
 	images := []*hcloud.Image{{ID: 3}, {ID: 2}, {ID: 1}}
-	got := PruneCandidates(images, 2)
+	policy := config.Policy{KeepMin: 1, KeepLast: 2}
+	got := PruneCandidates(images, policy, time.Now())
 	if len(got) != 1 || got[0].ID != 1 {
 		t.Fatalf("unexpected candidates: %#v", got)
 	}
-	if got := PruneCandidates(images, 3); len(got) != 0 {
+	policy.KeepLast = 3
+	if got := PruneCandidates(images, policy, time.Now()); len(got) != 0 {
 		t.Fatalf("expected no candidates: %#v", got)
+	}
+}
+
+func TestPruneCandidatesCombinesCountAndAgeBounds(t *testing.T) {
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	image := func(id int64, age time.Duration) *hcloud.Image {
+		return &hcloud.Image{ID: id, Created: now.Add(-age), Labels: map[string]string{}}
+	}
+	images := []*hcloud.Image{
+		image(1, time.Hour),
+		image(2, 31*24*time.Hour),
+		image(3, 10*24*time.Hour),
+		image(4, time.Hour),
+		image(5, 24*time.Hour),
+	}
+	policy := config.Policy{KeepMin: 1, KeepLast: 3, MinAge: 24 * time.Hour, MaxAge: 30 * 24 * time.Hour}
+	got := PruneCandidates(images, policy, now)
+	if len(got) != 2 || got[0].ID != 2 || got[1].ID != 5 {
+		t.Fatalf("candidates = %#v", got)
+	}
+}
+
+func TestPruneCandidatesKeepMinOverridesMaxAgeAndServerOverride(t *testing.T) {
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-60 * 24 * time.Hour)
+	images := []*hcloud.Image{
+		{ID: 3, Created: old, Labels: map[string]string{metadataPrefix + "keep-last": "1"}},
+		{ID: 2, Created: old, Labels: map[string]string{}},
+		{ID: 1, Created: old, Labels: map[string]string{}},
+	}
+	policy := config.Policy{KeepMin: 2, KeepLast: 3, MaxAge: 30 * 24 * time.Hour}
+	got := PruneCandidates(images, policy, now)
+	if len(got) != 1 || got[0].ID != 1 {
+		t.Fatalf("candidates = %#v", got)
+	}
+}
+
+func TestPruneCandidatesProtectsFutureSnapshotFromMinimumAgeRule(t *testing.T) {
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	images := []*hcloud.Image{
+		{ID: 2, Created: now, Labels: map[string]string{}},
+		{ID: 1, Created: now.Add(time.Hour), Labels: map[string]string{}},
+	}
+	policy := config.Policy{KeepMin: 1, KeepLast: 1, MinAge: time.Hour}
+	if got := PruneCandidates(images, policy, now); len(got) != 0 {
+		t.Fatalf("future snapshot selected: %#v", got)
+	}
+}
+
+func TestPruneDryRunAndApplyUseSameAgeCandidates(t *testing.T) {
+	now := time.Now().UTC()
+	created := []time.Time{now.Add(-40 * 24 * time.Hour), now.Add(-41 * 24 * time.Hour), now.Add(-42 * 24 * time.Hour)}
+	var deleted []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/images", func(w http.ResponseWriter, _ *http.Request) {
+		images := make([]schema.Image, 3)
+		for i := range images {
+			images[i] = schema.Image{
+				ID: int64(3 - i), Status: "available", Type: "snapshot", Created: &created[i],
+				Labels: map[string]string{metadataPrefix + "managed": "v1", metadataPrefix + "source-id": "42"},
+			}
+		}
+		writeJSON(t, w, map[string]any{"images": images, "meta": map[string]any{"pagination": map[string]any{"page": 1, "last_page": 1}}})
+	})
+	mux.HandleFunc("/images/2", func(w http.ResponseWriter, r *http.Request) {
+		deleted = append(deleted, r.URL.Path)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("/images/1", func(w http.ResponseWriter, r *http.Request) {
+		deleted = append(deleted, r.URL.Path)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := hcloud.NewClient(hcloud.WithToken("test"), hcloud.WithEndpoint(server.URL))
+	svc := Service{
+		Project: "prod", Cloud: &Cloud{Client: client}, Timeout: time.Second,
+		Policy: config.Policy{KeepMin: 1, KeepLast: 3, MaxAge: 30 * 24 * time.Hour},
+	}
+	dryRun := svc.Prune(context.Background(), false, false)
+	if len(dryRun) != 2 || len(deleted) != 0 {
+		t.Fatalf("dry run events = %#v, deleted = %#v", dryRun, deleted)
+	}
+	applied := svc.Prune(context.Background(), true, false)
+	if len(applied) != 2 || len(deleted) != 2 {
+		t.Fatalf("applied events = %#v, deleted = %#v", applied, deleted)
+	}
+	for i := range dryRun {
+		if dryRun[i].ResourceID != applied[i].ResourceID {
+			t.Fatalf("candidate mismatch: dry run = %#v, applied = %#v", dryRun, applied)
+		}
 	}
 }
 

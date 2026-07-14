@@ -222,15 +222,10 @@ func (s *Service) prune(ctx context.Context, apply bool, restrict map[int64]bool
 		groups[id] = append(groups[id], image)
 	}
 	var events []Event
+	now := time.Now().UTC()
 	for sourceID, group := range groups {
 		sort.Slice(group, func(i, j int) bool { return group[i].Created.After(group[j].Created) })
-		keep := s.Policy.KeepLast
-		if len(group) > 0 {
-			if v, err := strconv.Atoi(group[0].Labels[metadataPrefix+"keep-last"]); err == nil && v >= 1 {
-				keep = v
-			}
-		}
-		for _, image := range PruneCandidates(group, keep) {
+		for _, image := range PruneCandidates(group, s.Policy, now) {
 			if image.Protection.Delete && !force {
 				events = append(events, s.event("prune", image.ID, "snapshot is deletion-protected; retained", nil))
 				continue
@@ -259,11 +254,39 @@ func (s *Service) prune(ctx context.Context, apply bool, restrict map[int64]bool
 	return events
 }
 
-func PruneCandidates(images []*hcloud.Image, keep int) []*hcloud.Image {
-	if keep < 0 || len(images) <= keep {
-		return nil
+// PruneCandidates returns deletable snapshots from an input ordered newest
+// first. KeepMin is an absolute floor; MaxAge may override KeepLast but never
+// KeepMin. The newest snapshot carries any per-server KeepLast override.
+func PruneCandidates(images []*hcloud.Image, policy config.Policy, now time.Time) []*hcloud.Image {
+	keepMin := policy.KeepMin
+	if keepMin < 1 {
+		keepMin = 1
 	}
-	return images[keep:]
+	keepLast := policy.KeepLast
+	if len(images) > 0 {
+		if value, err := strconv.Atoi(images[0].Labels[metadataPrefix+"keep-last"]); err == nil && value >= 1 {
+			keepLast = value
+		}
+	}
+	if keepLast < keepMin {
+		keepLast = keepMin
+	}
+
+	var candidates []*hcloud.Image
+	for index, image := range images {
+		if index < keepMin {
+			continue
+		}
+		age := now.Sub(image.Created)
+		if policy.MaxAge > 0 && age >= policy.MaxAge {
+			candidates = append(candidates, image)
+			continue
+		}
+		if index >= keepLast && (policy.MinAge <= 0 || age >= policy.MinAge) {
+			candidates = append(candidates, image)
+		}
+	}
+	return candidates
 }
 
 func (s *Service) ListSnapshots(ctx context.Context, all bool) ([]*hcloud.Image, error) {
