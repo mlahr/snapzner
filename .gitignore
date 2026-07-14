@@ -5,7 +5,7 @@ credentials.yaml
 .env.*
 
 # Build outputs.
-snapzner
+/snapzner
 bin/
 dist/
 

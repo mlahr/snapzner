@@ -54,71 +54,17 @@ func (a *app) rootCommand() *cobra.Command {
 	root.PersistentFlags().BoolVar(&a.quiet, "quiet", false, "only print errors")
 	root.PersistentFlags().StringSliceVar(&a.projects, "project", nil, "project alias to operate on (repeatable)")
 	root.PersistentFlags().BoolVarP(&a.yes, "yes", "y", false, "confirm non-interactive mutations")
-	root.AddCommand(a.configureCommand(), a.projectsCommand(), a.backupCommand(), a.pruneCommand(), a.snapshotsCommand(), a.replayCommand())
+	configure := a.configureCommand()
+	root.AddCommand(configure, a.projectsCommand(), a.backupCommand(), a.pruneCommand(), a.snapshotsCommand(), a.replayCommand())
 	root.AddCommand(&cobra.Command{Use: "version", Run: func(_ *cobra.Command, _ []string) { fmt.Fprintln(a.out, a.version) }})
 	return root
 }
 
 func (a *app) configureCommand() *cobra.Command {
-	var alias string
-	command := &cobra.Command{
-		Use: "configure", Short: "Prompt for and securely store a project API token", Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if alias == "" {
-				if !term.IsTerminal(int(os.Stdin.Fd())) {
-					return fmt.Errorf("--project is required without an interactive terminal")
-				}
-				fmt.Fprint(a.errOut, "Project alias: ")
-				line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-				if err != nil {
-					return err
-				}
-				alias = strings.TrimSpace(line)
-			}
-			if alias == "" {
-				return fmt.Errorf("project alias cannot be empty")
-			}
-			if !term.IsTerminal(int(os.Stdin.Fd())) {
-				return fmt.Errorf("token entry requires an interactive terminal")
-			}
-			fmt.Fprintf(a.errOut, "Hetzner API token for %s: ", alias)
-			secret, err := term.ReadPassword(int(os.Stdin.Fd()))
-			fmt.Fprintln(a.errOut)
-			if err != nil {
-				return err
-			}
-			token := strings.TrimSpace(string(secret))
-			if token == "" {
-				return fmt.Errorf("token cannot be empty")
-			}
-			validateCtx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
-			defer cancel()
-			if err := snapzner.NewCloud(token, a.version).Validate(validateCtx); err != nil {
-				return fmt.Errorf("token validation failed: %w", err)
-			}
-			cfg, err := config.LoadOrDefault(a.configPath)
-			if err != nil {
-				return err
-			}
-			cfg.UpsertProject(alias)
-			if err := config.Save(a.configPath, cfg); err != nil {
-				return err
-			}
-			path := credentials.PathForConfig(a.configPath)
-			store, err := credentials.Load(path)
-			if err != nil {
-				return err
-			}
-			store.Tokens[alias] = token
-			if err := credentials.Save(path, store); err != nil {
-				return err
-			}
-			fmt.Fprintf(a.out, "Configured project %s in %s\n", alias, a.configPath)
-			return nil
-		},
+	return &cobra.Command{
+		Use: "configure", Short: "Interactively configure Snapzner", Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error { return a.runConfigure(cmd.Context()) },
 	}
-	command.Flags().StringVar(&alias, "project", "", "project alias")
-	return command
 }
 
 func (a *app) projectsCommand() *cobra.Command {
@@ -172,15 +118,21 @@ func (a *app) backupCommand() *cobra.Command {
 			return err
 		}
 		defer unlock()
+		progress := newBackupProgressRenderer(a.errOut, a.quiet)
+		defer progress.Close()
 		return a.runProjects(cmd.Context(), func(ctx context.Context, svc *snapzner.Service, p config.Project) []snapzner.Event {
+			svc.OnProgress = progress.Report
 			return svc.Backup(ctx, p)
 		})
 	}}
 }
 
 func (a *app) pruneCommand() *cobra.Command {
-	var apply bool
+	var apply, force bool
 	command := &cobra.Command{Use: "prune", Short: "Preview or apply snapshot retention", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		if force && !apply {
+			return fmt.Errorf("--force requires --apply")
+		}
 		var unlock func()
 		var err error
 		if apply {
@@ -191,28 +143,33 @@ func (a *app) pruneCommand() *cobra.Command {
 			defer unlock()
 		}
 		return a.runProjects(cmd.Context(), func(ctx context.Context, svc *snapzner.Service, _ config.Project) []snapzner.Event {
-			return svc.Prune(ctx, apply)
+			return svc.Prune(ctx, apply, force)
 		})
 	}}
 	command.Flags().BoolVar(&apply, "apply", false, "delete snapshots instead of previewing")
+	command.Flags().BoolVar(&force, "force", false, "disable deletion protection on retention candidates")
 	return command
 }
 
 func (a *app) snapshotsCommand() *cobra.Command {
 	root := &cobra.Command{Use: "snapshots", Short: "List and delete snapshots"}
-	root.AddCommand(&cobra.Command{Use: "list", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	var all bool
+	listCommand := &cobra.Command{Use: "list", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		return a.runProjects(cmd.Context(), func(ctx context.Context, svc *snapzner.Service, _ config.Project) []snapzner.Event {
-			images, err := svc.ListSnapshots(ctx)
+			images, err := svc.ListSnapshots(ctx, all)
 			if err != nil {
 				return []snapzner.Event{{Project: svc.Project, Operation: "list", Message: "could not list snapshots", Error: err.Error()}}
 			}
 			events := make([]snapzner.Event, 0, len(images))
 			for _, image := range images {
-				events = append(events, snapzner.Event{Project: svc.Project, Operation: "list", ResourceID: image.ID, Message: fmt.Sprintf("%s | source=%s | created=%s", image.Description, image.Labels["snapzner.mlahr.dev/source-name"], image.Created.UTC().Format(time.RFC3339))})
+				managed := image.Labels["snapzner.mlahr.dev/managed"] == "v1"
+				events = append(events, snapzner.Event{Project: svc.Project, Operation: "list", ResourceID: image.ID, Message: fmt.Sprintf("%s | managed=%t | source=%s | created=%s", image.Description, managed, image.Labels["snapzner.mlahr.dev/source-name"], image.Created.UTC().Format(time.RFC3339))})
 			}
 			return events
 		})
-	}})
+	}}
+	listCommand.Flags().BoolVar(&all, "all", false, "include snapshots not managed by Snapzner")
+	root.AddCommand(listCommand)
 	var ids []int64
 	var force bool
 	deleteCommand := &cobra.Command{Use: "delete", Short: "Delete explicitly identified snapshots", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
@@ -235,7 +192,7 @@ func (a *app) snapshotsCommand() *cobra.Command {
 		})
 	}}
 	deleteCommand.Flags().Int64SliceVar(&ids, "id", nil, "snapshot ID (repeatable)")
-	deleteCommand.Flags().BoolVar(&force, "force-unmanaged", false, "allow deletion of an unmanaged snapshot")
+	deleteCommand.Flags().BoolVar(&force, "force", false, "allow unmanaged or deletion-protected snapshots")
 	root.AddCommand(deleteCommand)
 	return root
 }
@@ -280,6 +237,7 @@ func (a *app) replayCommand() *cobra.Command {
 	cloneCmd.Flags().StringVar(&ipv4, "ipv4", "", "override IPv4 enablement (true or false)")
 	cloneCmd.Flags().StringVar(&ipv6, "ipv6", "", "override IPv6 enablement (true or false)")
 	var snapshot, source, target string
+	var force bool
 	rebuildCmd := &cobra.Command{Use: "rebuild", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		if len(a.projects) != 1 {
 			return fmt.Errorf("rebuild requires exactly one --project")
@@ -296,12 +254,13 @@ func (a *app) replayCommand() *cobra.Command {
 		}
 		defer unlock()
 		return a.runProjects(cmd.Context(), func(ctx context.Context, svc *snapzner.Service, _ config.Project) []snapzner.Event {
-			return svc.Rebuild(ctx, snapshot, source, target)
+			return svc.Rebuild(ctx, snapshot, source, target, force)
 		})
 	}}
 	rebuildCmd.Flags().StringVar(&snapshot, "snapshot", "", "snapshot ID or latest")
 	rebuildCmd.Flags().StringVar(&source, "source", "", "source server ID or name (required with latest)")
 	rebuildCmd.Flags().StringVar(&target, "target", "", "target server ID or name")
+	rebuildCmd.Flags().BoolVar(&force, "force", false, "temporarily disable target rebuild protection")
 	root.AddCommand(cloneCmd, rebuildCmd)
 	return root
 }
@@ -334,7 +293,7 @@ func (a *app) runProjects(ctx context.Context, fn func(context.Context, *snapzne
 				results <- []snapzner.Event{{Project: p.Name, Operation: "project", Message: "credential unavailable", Error: err.Error()}}
 				return
 			}
-			svc := &snapzner.Service{Project: p.Name, Cloud: snapzner.NewCloud(token, a.version), Policy: cfg.PolicyFor(p), Timeout: cfg.Defaults.OperationTimeout, ServerConcurrency: cfg.Defaults.ServerConcurrency}
+			svc := &snapzner.Service{Project: p.Name, Cloud: snapzner.NewCloud(token, a.version), Policy: cfg.Policy(), Timeout: cfg.Defaults.OperationTimeout, ServerConcurrency: cfg.Defaults.ServerConcurrency}
 			results <- fn(ctx, svc, p)
 		}()
 	}

@@ -48,13 +48,7 @@ func (s Store) Token(project string) (string, error) {
 }
 
 func Save(path string, s Store) error {
-	if s.Version == 0 {
-		s.Version = 1
-	}
-	if s.Tokens == nil {
-		s.Tokens = map[string]string{}
-	}
-	b, err := yaml.Marshal(s)
+	b, err := Marshal(s)
 	if err != nil {
 		return err
 	}
@@ -87,4 +81,14 @@ func Save(path string, s Store) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+func Marshal(s Store) ([]byte, error) {
+	if s.Version == 0 {
+		s.Version = 1
+	}
+	if s.Tokens == nil {
+		s.Tokens = map[string]string{}
+	}
+	return yaml.Marshal(s)
 }

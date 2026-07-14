@@ -1,8 +1,10 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -36,13 +38,9 @@ type Defaults struct {
 }
 
 type Project struct {
-	Name           string   `yaml:"name"`
-	LabelSelector  *string  `yaml:"label_selector,omitempty"`
-	RetentionLabel *string  `yaml:"retention_label,omitempty"`
-	KeepLast       *int     `yaml:"keep_last,omitempty"`
-	SnapshotName   *string  `yaml:"snapshot_name,omitempty"`
-	Include        []string `yaml:"include,omitempty"`
-	Exclude        []string `yaml:"exclude,omitempty"`
+	Name    string   `yaml:"name"`
+	Include []string `yaml:"include,omitempty"`
+	Exclude []string `yaml:"exclude,omitempty"`
 }
 
 type Policy struct {
@@ -84,7 +82,16 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 	c := Default()
-	if err := yaml.Unmarshal(b, &c); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(b))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&c); err != nil {
+		return Config{}, fmt.Errorf("decode config: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return Config{}, fmt.Errorf("decode config: multiple YAML documents are not supported")
+		}
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
 	if err := c.Validate(); err != nil {
@@ -105,11 +112,8 @@ func (c *Config) Validate() error {
 	if c.Version != 1 {
 		return fmt.Errorf("config version must be 1")
 	}
-	if c.Defaults.LabelSelector == "" {
-		c.Defaults.LabelSelector = DefaultSelector
-	}
 	if c.Defaults.RetentionLabel == "" {
-		c.Defaults.RetentionLabel = DefaultRetentionLabel
+		return fmt.Errorf("defaults.retention_label cannot be empty")
 	}
 	if c.Defaults.KeepLast == 0 {
 		c.Defaults.KeepLast = 3
@@ -118,7 +122,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("defaults.keep_last must be at least 1")
 	}
 	if c.Defaults.SnapshotName == "" {
-		c.Defaults.SnapshotName = DefaultSnapshotName
+		return fmt.Errorf("defaults.snapshot_name cannot be empty")
 	}
 	if c.Defaults.OperationTimeoutRaw == "" {
 		c.Defaults.OperationTimeoutRaw = "1h"
@@ -146,9 +150,6 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("duplicate project name %q", p.Name)
 		}
 		seen[p.Name] = true
-		if p.KeepLast != nil && *p.KeepLast < 1 {
-			return fmt.Errorf("project %q keep_last must be at least 1", p.Name)
-		}
 		for _, ref := range append(append([]string{}, p.Include...), p.Exclude...) {
 			if err := ValidateServerRef(ref); err != nil {
 				return fmt.Errorf("project %q: %w", p.Name, err)
@@ -168,21 +169,15 @@ func ValidateServerRef(ref string) error {
 	return fmt.Errorf("server reference %q must start with id: or name:", ref)
 }
 
-func (c Config) PolicyFor(p Project) Policy {
-	policy := Policy{c.Defaults.LabelSelector, c.Defaults.RetentionLabel, c.Defaults.KeepLast, c.Defaults.SnapshotName}
-	if p.LabelSelector != nil {
-		policy.LabelSelector = *p.LabelSelector
+func (c Config) Policy() Policy {
+	return Policy{c.Defaults.LabelSelector, c.Defaults.RetentionLabel, c.Defaults.KeepLast, c.Defaults.SnapshotName}
+}
+
+func ValidateProjectName(name string) error {
+	if !aliasPattern.MatchString(name) {
+		return fmt.Errorf("project name must be 1-63 characters using letters, digits, dots, underscores, or dashes")
 	}
-	if p.RetentionLabel != nil {
-		policy.RetentionLabel = *p.RetentionLabel
-	}
-	if p.KeepLast != nil {
-		policy.KeepLast = *p.KeepLast
-	}
-	if p.SnapshotName != nil {
-		policy.SnapshotName = *p.SnapshotName
-	}
-	return policy
+	return nil
 }
 
 func (c Config) FindProject(name string) (Project, bool) {
@@ -214,14 +209,18 @@ func (c *Config) RemoveProject(name string) bool {
 }
 
 func Save(path string, c Config) error {
-	if err := c.Validate(); err != nil {
-		return err
-	}
-	b, err := yaml.Marshal(c)
+	b, err := Marshal(c)
 	if err != nil {
 		return err
 	}
 	return atomicWrite(path, b, 0o600)
+}
+
+func Marshal(c Config) ([]byte, error) {
+	if err := c.Validate(); err != nil {
+		return nil, err
+	}
+	return yaml.Marshal(c)
 }
 
 func atomicWrite(path string, data []byte, mode os.FileMode) error {

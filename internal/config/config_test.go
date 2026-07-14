@@ -7,9 +7,9 @@ import (
 	"time"
 )
 
-func TestLoadDefaultsAndProjectOverrides(t *testing.T) {
+func TestLoadDefaultsAndGlobalPolicy(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	data := []byte("version: 1\ndefaults:\n  operation_timeout: 30m\nprojects:\n  - name: prod\n    keep_last: 7\n    include: [id:42]\n")
+	data := []byte("version: 1\ndefaults:\n  operation_timeout: 30m\n  keep_last: 7\nprojects:\n  - name: prod\n    include: [id:42]\n")
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -23,9 +23,34 @@ func TestLoadDefaultsAndProjectOverrides(t *testing.T) {
 	if cfg.Defaults.OperationTimeout != 30*time.Minute {
 		t.Fatalf("timeout = %s", cfg.Defaults.OperationTimeout)
 	}
-	policy := cfg.PolicyFor(cfg.Projects[0])
+	policy := cfg.Policy()
 	if policy.KeepLast != 7 {
 		t.Fatalf("keep_last = %d", policy.KeepLast)
+	}
+}
+
+func TestLoadRejectsPerProjectPolicyOverrides(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\nprojects:\n  - name: prod\n    keep_last: 7\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected unknown-field error")
+	}
+}
+
+func TestLoadPreservesDisabledSelector(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte("version: 1\ndefaults:\n  label_selector: \"\"\nprojects:\n  - name: prod\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Defaults.LabelSelector != "" {
+		t.Fatalf("selector = %q", cfg.Defaults.LabelSelector)
 	}
 }
 

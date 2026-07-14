@@ -37,19 +37,36 @@ Alternatively, download a `.deb` or tarball from
 go build -o snapzner .
 ```
 
-## Configure projects
+## Configure Snapzner
 
 Run configuration as the same Unix user that will run the cron job:
 
 ```sh
-snapzner configure --project production
-snapzner configure --project staging
+snapzner configure
 snapzner projects list
 ```
 
-`configure` prompts for the API token without echoing it, verifies access, and
-stores it in `credentials.yaml`. The configuration directory is mode `0700` and
-both YAML files are mode `0600`.
+The interactive wizard configures:
+
+- The global server label selector, retention label, snapshot count, and
+  snapshot naming format.
+- Operation timeout and project/server concurrency.
+- Every Hetzner project and its API token.
+- The exact final set of servers to back up in each project.
+
+After validating a project's token, Snapzner opens a full-screen server picker.
+Use the arrow keys to move, Space to toggle, `a` to select all, `n` to select
+none, Enter to confirm, or Esc to cancel. Snapzner converts that
+final selection into stable ID-based `include` and `exclude` entries; these
+lists do not need to be maintained manually.
+
+Running `configure` again loads the current settings, lets you retain or remove
+each project, and offers to add more projects. Existing tokens remain hidden
+and are kept unless you request replacement or validation fails. Nothing is
+written until you confirm the final summary.
+
+Tokens are prompted without echoing and stored in `credentials.yaml`. The
+configuration directory is mode `0700` and both YAML files are mode `0600`.
 
 On Linux, the default paths are:
 
@@ -86,9 +103,9 @@ projects:
     exclude: ["name:temporary"]
 ```
 
-Each project may override `label_selector`, `retention_label`, `keep_last`, and
-`snapshot_name`. Set a project's `label_selector` to an empty string to use only
-its explicit include list.
+All projects use the global selector, retention, and naming settings. Enter `-`
+for the label selector in `configure` to disable label selection and use only
+the servers selected through the picker.
 
 Effective selection is:
 
@@ -96,8 +113,8 @@ Effective selection is:
 (label selector matches union explicit includes) minus explicit excludes
 ```
 
-Explicit references must use `id:` or `name:`. Unresolved references fail that
-project before any snapshots are created.
+The wizard writes stable `id:` references. If an existing reference no longer
+resolves, the next configuration run reports and removes it.
 
 A selected server can override retention with the configured retention label:
 
@@ -126,7 +143,11 @@ snapzner backup --project production --project staging
 
 After a server's new snapshot becomes available, `backup` enforces that
 server's retention. A failed snapshot never triggers automatic pruning for
-that server.
+that server. While a backup is running, Snapzner reports server selection,
+snapshot creation, completion counts, and retention progress on standard
+error. Snapshot creation uses an animated spinner when standard error is a
+terminal and plain progress lines when it is redirected. Final human-readable
+or JSON results remain on standard output.
 
 Preview standalone pruning, then apply it:
 
@@ -136,7 +157,9 @@ snapzner prune --apply
 ```
 
 Only snapshots carrying `snapzner.mlahr.dev/managed=v1` are automatically
-pruned. Deletion-protected snapshots are reported and retained.
+pruned. Deletion-protected snapshots are reported and retained. To include
+them deliberately, use `snapzner prune --apply --force`; Snapzner disables
+their deletion protection before deleting them.
 
 List managed snapshots or delete exact IDs:
 
@@ -145,8 +168,13 @@ snapzner snapshots list --project production
 snapzner snapshots delete --project production --id 123 --id 456
 ```
 
-Deleting an unmanaged snapshot requires both an exact ID and
-`--force-unmanaged`. Backup, system, and app images are never deleted by this
+Use `snapzner snapshots list --all --project production` to include snapshots
+not managed by Snapzner. List output identifies each snapshot as managed or
+unmanaged and includes its image ID.
+
+Deleting an unmanaged or deletion-protected snapshot requires both an exact ID
+and `--force`. For a protected snapshot, Snapzner disables deletion protection
+before deletion. Backup, system, and app images are never deleted by this
 command. Interactive confirmation is required unless `--yes` is supplied.
 
 ## Replay snapshots
@@ -175,8 +203,9 @@ snapzner replay rebuild --project production \
 ```
 
 Rebuild is destructive. It retains the target Hetzner server resource and its
-current attachments, and it respects Hetzner rebuild protection. Snapzner does
-not disable protection automatically.
+current attachments. If the target has rebuild protection, `--force` is
+required; Snapzner temporarily disables the protection and restores it after
+the rebuild action finishes.
 
 Clone and rebuild commands require interactive confirmation, or `--yes` for
 deliberate non-interactive use.
@@ -196,7 +225,7 @@ overlapping run fails instead of creating duplicate concurrent runs.
 ## Output and failure behavior
 
 - `--json` emits a JSON array of result events.
-- `--quiet` suppresses successful human-readable events.
+- `--quiet` suppresses successful human-readable events and backup progress.
 - Independent projects and servers continue after failures.
 - The process exits nonzero if any requested operation fails.
 - `SIGINT` and `SIGTERM` cancel waits and pending API requests. An already
