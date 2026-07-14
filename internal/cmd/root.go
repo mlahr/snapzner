@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/mlahr/snapzner/internal/config"
 	"github.com/mlahr/snapzner/internal/credentials"
@@ -23,14 +22,15 @@ import (
 )
 
 type app struct {
-	version    string
-	configPath string
-	jsonOutput bool
-	quiet      bool
-	projects   []string
-	yes        bool
-	out        io.Writer
-	errOut     io.Writer
+	version              string
+	configPath           string
+	jsonOutput           bool
+	quiet                bool
+	projects             []string
+	yes                  bool
+	out                  io.Writer
+	errOut               io.Writer
+	legacyWarningEmitted bool
 }
 
 func Execute(ctx context.Context, version string) error {
@@ -70,7 +70,7 @@ func (a *app) configureCommand() *cobra.Command {
 func (a *app) projectsCommand() *cobra.Command {
 	root := &cobra.Command{Use: "projects", Short: "Manage configured projects"}
 	root.AddCommand(&cobra.Command{Use: "list", Args: cobra.NoArgs, RunE: func(_ *cobra.Command, _ []string) error {
-		cfg, err := config.Load(a.configPath)
+		cfg, err := a.loadConfig()
 		if err != nil {
 			return err
 		}
@@ -86,7 +86,7 @@ func (a *app) projectsCommand() *cobra.Command {
 		if err := a.confirm(fmt.Sprintf("Remove locally stored configuration and credential for project %s?", args[0])); err != nil {
 			return err
 		}
-		cfg, err := config.Load(a.configPath)
+		cfg, err := a.loadConfig()
 		if err != nil {
 			return err
 		}
@@ -183,8 +183,7 @@ func (a *app) snapshotsCommand() *cobra.Command {
 			}
 			events := make([]snapzner.Event, 0, len(images))
 			for _, image := range images {
-				managed := image.Labels["snapzner.mlahr.dev/managed"] == "v1"
-				events = append(events, snapzner.Event{Project: svc.Project, Operation: "list", ResourceID: image.ID, Message: fmt.Sprintf("%s | managed=%t | source=%s | created=%s", image.Description, managed, image.Labels["snapzner.mlahr.dev/source-name"], image.Created.UTC().Format(time.RFC3339))})
+				events = append(events, snapzner.Event{Project: svc.Project, Operation: "list", ResourceID: image.ID, Message: snapzner.SnapshotSummary(image)})
 			}
 			return events
 		})
@@ -287,7 +286,7 @@ func (a *app) replayCommand() *cobra.Command {
 }
 
 func (a *app) runProjects(ctx context.Context, fn func(context.Context, *snapzner.Service, config.Project) []snapzner.Event) error {
-	cfg, err := config.Load(a.configPath)
+	cfg, err := a.loadConfig()
 	if err != nil {
 		return err
 	}
@@ -330,6 +329,22 @@ func (a *app) runProjects(ctx context.Context, fn func(context.Context, *snapzne
 		}
 	}
 	return a.finishEvents(events, failed)
+}
+
+func (a *app) loadConfig() (config.Config, error) {
+	cfg, err := config.Load(a.configPath)
+	if err != nil {
+		return config.Config{}, err
+	}
+	if cfg.LegacyRetentionFields && !a.quiet && !a.legacyWarningEmitted {
+		targets := strings.Join(cfg.Defaults.KeepTargetsRaw, ", ")
+		if targets == "" {
+			targets = "none"
+		}
+		fmt.Fprintf(a.errOut, "snapzner: warning: legacy retention fields in %s are ignored; using keep_max=%d, keep_latest=%d, keep_targets=[%s]; run 'snapzner configure' to migrate\n", a.configPath, cfg.Defaults.KeepMax, cfg.Defaults.KeepLatest, targets)
+		a.legacyWarningEmitted = true
+	}
+	return cfg, nil
 }
 
 func (a *app) serviceForProject(cfg config.Config, store credentials.Store, project config.Project) (*snapzner.Service, error) {

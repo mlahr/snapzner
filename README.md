@@ -11,7 +11,7 @@ processed independently with bounded concurrency.
 
 - Multiple Hetzner Cloud projects in one invocation.
 - Label-selector and explicit include/exclude server selection.
-- Per-project and per-server count-based retention.
+- Per-server bounded retention with latest and age-target recovery points.
 - Managed-snapshot ownership labels that prevent accidental pruning of manual snapshots.
 - Previewable standalone pruning and exact-ID deletion.
 - Clone replay to a newly billed server.
@@ -48,7 +48,7 @@ snapzner projects list
 
 The interactive wizard configures:
 
-- The global server label selector, count- and age-based retention, and
+- The global server label selector, bounded age-target retention, and
   snapshot naming format.
 - Operation timeout and project/server concurrency.
 - Every Hetzner project and its API token.
@@ -90,11 +90,10 @@ version: 1
 
 defaults:
   label_selector: "AUTOBACKUP=true"
-  retention_label: "AUTOBACKUP.KEEP-LAST"
-  keep_min: 1
-  keep_last: 3
-  min_age: 24h
-  max_age: 30d
+  retention_label: "AUTOBACKUP.KEEP-MAX"
+  keep_max: 5
+  keep_latest: 2
+  keep_targets: [1d, 1w, 2w]
   snapshot_name: "%name%-%timestamp%"
   operation_timeout: 1h
   project_concurrency: 4
@@ -122,34 +121,53 @@ resolves, the next configuration run reports and removes it.
 A selected server can override retention with the configured retention label:
 
 ```text
-AUTOBACKUP.KEEP-LAST=7
+AUTOBACKUP.KEEP-MAX=7
 ```
 
-The value must be an integer of at least one.
+The value must be an integer of at least one and overrides `keep_max` for that
+server. Snapzner records the effective maximum on each new snapshot so later
+standalone prune operations use the same override.
 
 Retention is evaluated separately for each source server, with snapshots
-ordered newest first. Snapzner always retains `keep_min` snapshots. For every
-remaining snapshot, it deletes the snapshot when either:
+ordered newest first. Snapzner retains the first `keep_latest` snapshots. It
+then processes `keep_targets` from youngest to oldest. For each target, it
+retains the newest snapshot that:
 
-```text
-age >= max_age
-or
-position is outside keep_last and age >= min_age
-```
+- is at least as old as the target; and
+- has not already been retained by another slot.
 
-An omitted or zero age disables that age bound. With a disabled `min_age`,
-snapshots outside `keep_last` are immediately eligible, preserving count-only
-retention. With a disabled `max_age`, age never overrides `keep_last`.
+Every other managed snapshot is eligible for pruning. Processing stops when
+the retained count reaches `keep_max`. If no snapshot is old enough for a
+target, that slot remains empty; Snapzner does not substitute a newer snapshot.
+The configured `keep_latest` plus the number of targets cannot exceed
+`keep_max`.
 
-For example, `keep_min: 1`, `keep_last: 3`, `min_age: 24h`, and `max_age: 30d`
-always retains the newest snapshot, retains snapshots two and three for at
-most 30 days, and deletes additional snapshots once they are at least 24 hours
-old. A per-server retention-label value overrides only `keep_last`; values
-below `keep_min` are clamped to `keep_min`.
+For example, with five snapshots per day, `keep_max: 5`, `keep_latest: 2`, and
+`keep_targets: [1d, 1w, 2w]` retains the latest two snapshots plus one snapshot
+at least 24 hours old, one at least 168 hours old, and one at least 336 hours
+old. Each target chooses the newest qualifying snapshot, giving five distinct
+recovery points when sufficient history exists.
 
-Age values are fixed elapsed durations. In addition to Go duration units,
-Snapzner accepts `d` as 24 hours and `w` as 168 hours, including composites
-such as `1w2d12h`.
+Targets are fixed elapsed durations relative to pruning time, not calendar
+dates. In addition to Go duration units, Snapzner accepts `d` as 24 hours and
+`w` as 168 hours, including composites such as `1w2d12h`. Targets must be
+positive, unique, and ordered from youngest to oldest. An empty list disables
+age targets.
+
+Deletion-protected snapshots are retained unless pruning uses `--force`.
+Consequently, protected snapshots can make the actual snapshot count exceed
+`keep_max`.
+
+Configurations containing the former `keep_min`, `keep_last`, `min_age`, and
+`max_age` fields remain loadable. Because that policy has no exact age-target
+equivalent, a legacy-only configuration uses the new default retention policy;
+any new retention fields already present take precedence. Running `snapzner
+configure` and saving rewrites the file without the legacy fields. The former
+default label `AUTOBACKUP.KEEP-LAST` is likewise migrated to
+`AUTOBACKUP.KEEP-MAX`; custom retention-label names are preserved. Commands
+that consume project configuration emit a migration warning until the file is
+rewritten without the legacy fields; `configure` itself does not emit that
+warning.
 
 Snapshot names support `%project%`, `%id%`, `%name%`, `%timestamp%`, `%date%`,
 and `%time%`. Date and time placeholders use UTC.

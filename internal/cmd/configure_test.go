@@ -80,7 +80,7 @@ func TestConfigureFirstRunAndRerun(t *testing.T) {
 	var output bytes.Buffer
 	first := &configureWizard{
 		ctx: context.Background(), prompt: &scriptedPrompt{
-			lines: []string{"role=backup", "BACKUP.KEEP", "1", "5", "24h", "30d", "%project%-%name%", "30m", "2", "3"},
+			lines: []string{"role=backup", "BACKUP.KEEP-MAX", "5", "2", "1d, 1w, 2w", "%project%-%name%", "30m", "2", "3"},
 			raw:   []string{"prod"}, secrets: []string{"super-secret-token"}, confirms: []bool{false, true},
 		}, out: &output, factory: func(string) projectAPI { return api }, configPath: path, version: "test",
 		picker: pickerWithChanges(map[int64]bool{2: true}),
@@ -92,7 +92,7 @@ func TestConfigureFirstRunAndRerun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Defaults.LabelSelector != "role=backup" || cfg.Defaults.KeepMin != 1 || cfg.Defaults.KeepLast != 5 || cfg.Defaults.MinAge != 24*time.Hour || cfg.Defaults.MaxAge != 30*24*time.Hour {
+	if cfg.Defaults.LabelSelector != "role=backup" || cfg.Defaults.KeepMax != 5 || cfg.Defaults.KeepLatest != 2 || len(cfg.Defaults.KeepTargets) != 3 || cfg.Defaults.KeepTargets[2] != 14*24*time.Hour {
 		t.Fatalf("unexpected defaults: %+v", cfg.Defaults)
 	}
 	if got := cfg.Projects[0].Include; len(got) != 1 || got[0] != "id:2" {
@@ -108,14 +108,14 @@ func TestConfigureFirstRunAndRerun(t *testing.T) {
 	if strings.Contains(output.String(), "super-secret-token") {
 		t.Fatal("token leaked to output")
 	}
-	if !strings.Contains(output.String(), "Keep: minimum 1, preferred 5") || !strings.Contains(output.String(), "Ages: minimum 24h, maximum 30d") {
+	if !strings.Contains(output.String(), "Keep: maximum 5, latest 2, age targets 1d, 1w, 2w") {
 		t.Fatalf("retention summary missing from output: %s", output.String())
 	}
 
 	output.Reset()
 	second := &configureWizard{
 		ctx: context.Background(), prompt: &scriptedPrompt{
-			lines:    []string{"", "", "", "", "", "", "", "", "", ""},
+			lines:    []string{"", "", "", "", "", "", "", "", ""},
 			confirms: []bool{true, false, false, true},
 		}, out: &output, factory: func(token string) projectAPI {
 			if token != "super-secret-token" {

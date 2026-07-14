@@ -3,11 +3,47 @@ package cmd
 import (
 	"bytes"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/mlahr/snapzner/internal/snapzner"
 )
+
+func TestLoadConfigWarnsOnceForLegacyRetention(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\ndefaults:\n  keep_last: 3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var warnings bytes.Buffer
+	a := &app{configPath: path, out: io.Discard, errOut: &warnings}
+	if _, err := a.loadConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.loadConfig(); err != nil {
+		t.Fatal(err)
+	}
+	got := warnings.String()
+	if strings.Count(got, "legacy retention fields") != 1 || !strings.Contains(got, "run 'snapzner configure' to migrate") {
+		t.Fatalf("warning = %q", got)
+	}
+}
+
+func TestLoadConfigSuppressesLegacyWarningWhenQuiet(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\ndefaults:\n  keep_last: 3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var warnings bytes.Buffer
+	a := &app{configPath: path, quiet: true, out: io.Discard, errOut: &warnings}
+	if _, err := a.loadConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if warnings.Len() != 0 {
+		t.Fatalf("quiet warning = %q", warnings.String())
+	}
+}
 
 func TestBackupProgressReporterWritesToErrorOutput(t *testing.T) {
 	var output bytes.Buffer

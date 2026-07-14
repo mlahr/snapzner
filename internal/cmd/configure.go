@@ -293,28 +293,19 @@ func (w *configureWizard) configureDefaults(d *config.Defaults) error {
 		return err
 	}
 	for {
-		if d.KeepMin, err = w.positiveInt("Minimum snapshots to keep", d.KeepMin); err != nil {
+		if d.KeepMax, err = w.positiveInt("Maximum snapshots to keep", d.KeepMax); err != nil {
 			return err
 		}
-		if d.KeepLast, err = w.positiveInt("Preferred snapshots to keep", d.KeepLast); err != nil {
+		if d.KeepLatest, err = w.positiveInt("Latest snapshots to keep", d.KeepLatest); err != nil {
 			return err
 		}
-		if d.KeepMin <= d.KeepLast {
+		if d.KeepTargetsRaw, d.KeepTargets, err = w.retentionTargets(d.KeepTargetsRaw); err != nil {
+			return err
+		}
+		if d.KeepLatest+len(d.KeepTargets) <= d.KeepMax {
 			break
 		}
-		fmt.Fprintln(w.out, "Minimum snapshots to keep cannot exceed preferred snapshots to keep.")
-	}
-	for {
-		if d.MinAgeRaw, d.MinAge, err = w.retentionAge("Minimum snapshot age", d.MinAgeRaw); err != nil {
-			return err
-		}
-		if d.MaxAgeRaw, d.MaxAge, err = w.retentionAge("Maximum snapshot age", d.MaxAgeRaw); err != nil {
-			return err
-		}
-		if d.MinAge == 0 || d.MaxAge == 0 || d.MinAge <= d.MaxAge {
-			break
-		}
-		fmt.Fprintln(w.out, "Minimum snapshot age cannot exceed maximum snapshot age.")
+		fmt.Fprintln(w.out, "Latest snapshots plus age targets cannot exceed maximum snapshots.")
 	}
 	if d.SnapshotName, err = w.nonempty("Snapshot name format", d.SnapshotName); err != nil {
 		return err
@@ -341,20 +332,31 @@ func (w *configureWizard) configureDefaults(d *config.Defaults) error {
 	return nil
 }
 
-func (w *configureWizard) retentionAge(label, current string) (string, time.Duration, error) {
+func (w *configureWizard) retentionTargets(current []string) ([]string, []time.Duration, error) {
 	for {
-		value, err := w.prompt.Line(label+" (0 to disable)", current)
+		value, err := w.prompt.Line("Snapshot age targets, youngest to oldest (comma-separated; - for none)", strings.Join(current, ", "))
 		if err != nil {
-			return "", 0, err
+			return nil, nil, err
 		}
-		duration, parseErr := config.ParseRetentionDuration(value)
-		if parseErr == nil {
-			if duration == 0 {
-				return "", 0, nil
+		if strings.TrimSpace(value) == "-" || strings.TrimSpace(value) == "" {
+			return []string{}, []time.Duration{}, nil
+		}
+		raw := strings.Split(value, ",")
+		targets := make([]time.Duration, len(raw))
+		valid := true
+		for i := range raw {
+			raw[i] = strings.TrimSpace(raw[i])
+			target, parseErr := config.ParseRetentionDuration(raw[i])
+			if parseErr != nil || target <= 0 || (i > 0 && target <= targets[i-1]) {
+				valid = false
+				break
 			}
-			return value, duration, nil
+			targets[i] = target
 		}
-		fmt.Fprintf(w.out, "%s must be zero or a fixed duration such as 24h, 30d, or 12w.\n", label)
+		if valid {
+			return raw, targets, nil
+		}
+		fmt.Fprintln(w.out, "Age targets must be positive fixed durations ordered from youngest to oldest, such as 1d, 1w, 2w.")
 	}
 }
 
@@ -566,15 +568,11 @@ func (w *configureWizard) printSummary(cfg config.Config, projects []projectSumm
 		selector = "<disabled>"
 	}
 	fmt.Fprintln(w.out, "\nConfiguration summary")
-	minAge := cfg.Defaults.MinAgeRaw
-	if minAge == "" {
-		minAge = "<disabled>"
+	targets := strings.Join(cfg.Defaults.KeepTargetsRaw, ", ")
+	if targets == "" {
+		targets = "<none>"
 	}
-	maxAge := cfg.Defaults.MaxAgeRaw
-	if maxAge == "" {
-		maxAge = "<disabled>"
-	}
-	fmt.Fprintf(w.out, "  Selector: %s\n  Retention label: %s\n  Keep: minimum %d, preferred %d\n  Ages: minimum %s, maximum %s\n  Snapshot name: %s\n  Timeout: %s\n  Concurrency: %d projects, %d servers per project\n", selector, cfg.Defaults.RetentionLabel, cfg.Defaults.KeepMin, cfg.Defaults.KeepLast, minAge, maxAge, cfg.Defaults.SnapshotName, cfg.Defaults.OperationTimeoutRaw, cfg.Defaults.ProjectConcurrency, cfg.Defaults.ServerConcurrency)
+	fmt.Fprintf(w.out, "  Selector: %s\n  Retention label: %s\n  Keep: maximum %d, latest %d, age targets %s\n  Snapshot name: %s\n  Timeout: %s\n  Concurrency: %d projects, %d servers per project\n", selector, cfg.Defaults.RetentionLabel, cfg.Defaults.KeepMax, cfg.Defaults.KeepLatest, targets, cfg.Defaults.SnapshotName, cfg.Defaults.OperationTimeoutRaw, cfg.Defaults.ProjectConcurrency, cfg.Defaults.ServerConcurrency)
 	for _, project := range projects {
 		fmt.Fprintf(w.out, "  Project %s: %d/%d servers selected; token %s\n", project.name, project.selected, project.total, project.tokenState)
 	}

@@ -17,30 +17,34 @@ import (
 
 const (
 	DefaultSelector       = "AUTOBACKUP=true"
-	DefaultRetentionLabel = "AUTOBACKUP.KEEP-LAST"
+	DefaultRetentionLabel = "AUTOBACKUP.KEEP-MAX"
 	DefaultSnapshotName   = "%name%-%timestamp%"
+	legacyRetentionLabel  = "AUTOBACKUP.KEEP-LAST"
 )
 
 type Config struct {
-	Version  int       `yaml:"version"`
-	Defaults Defaults  `yaml:"defaults"`
-	Projects []Project `yaml:"projects"`
+	Version               int       `yaml:"version"`
+	Defaults              Defaults  `yaml:"defaults"`
+	Projects              []Project `yaml:"projects"`
+	LegacyRetentionFields bool      `yaml:"-"`
 }
 
 type Defaults struct {
-	LabelSelector       string        `yaml:"label_selector"`
-	RetentionLabel      string        `yaml:"retention_label"`
-	KeepMin             int           `yaml:"keep_min"`
-	KeepLast            int           `yaml:"keep_last"`
-	MinAge              time.Duration `yaml:"-"`
-	MinAgeRaw           string        `yaml:"min_age,omitempty"`
-	MaxAge              time.Duration `yaml:"-"`
-	MaxAgeRaw           string        `yaml:"max_age,omitempty"`
-	SnapshotName        string        `yaml:"snapshot_name"`
-	OperationTimeout    time.Duration `yaml:"-"`
-	OperationTimeoutRaw string        `yaml:"operation_timeout"`
-	ProjectConcurrency  int           `yaml:"project_concurrency"`
-	ServerConcurrency   int           `yaml:"server_concurrency"`
+	LabelSelector       string          `yaml:"label_selector"`
+	RetentionLabel      string          `yaml:"retention_label"`
+	KeepMax             int             `yaml:"keep_max"`
+	KeepLatest          int             `yaml:"keep_latest"`
+	KeepTargets         []time.Duration `yaml:"-"`
+	KeepTargetsRaw      []string        `yaml:"keep_targets"`
+	LegacyKeepMin       *int            `yaml:"keep_min,omitempty"`
+	LegacyKeepLast      *int            `yaml:"keep_last,omitempty"`
+	LegacyMinAge        *string         `yaml:"min_age,omitempty"`
+	LegacyMaxAge        *string         `yaml:"max_age,omitempty"`
+	SnapshotName        string          `yaml:"snapshot_name"`
+	OperationTimeout    time.Duration   `yaml:"-"`
+	OperationTimeoutRaw string          `yaml:"operation_timeout"`
+	ProjectConcurrency  int             `yaml:"project_concurrency"`
+	ServerConcurrency   int             `yaml:"server_concurrency"`
 }
 
 type Project struct {
@@ -52,10 +56,9 @@ type Project struct {
 type Policy struct {
 	LabelSelector  string
 	RetentionLabel string
-	KeepMin        int
-	KeepLast       int
-	MinAge         time.Duration
-	MaxAge         time.Duration
+	KeepMax        int
+	KeepLatest     int
+	KeepTargets    []time.Duration
 	SnapshotName   string
 }
 
@@ -70,8 +73,10 @@ func Default() Config {
 		Defaults: Defaults{
 			LabelSelector:       DefaultSelector,
 			RetentionLabel:      DefaultRetentionLabel,
-			KeepMin:             1,
-			KeepLast:            3,
+			KeepMax:             5,
+			KeepLatest:          2,
+			KeepTargets:         []time.Duration{24 * time.Hour, 7 * 24 * time.Hour, 14 * 24 * time.Hour},
+			KeepTargetsRaw:      []string{"1d", "1w", "2w"},
 			SnapshotName:        DefaultSnapshotName,
 			OperationTimeout:    time.Hour,
 			OperationTimeoutRaw: "1h",
@@ -128,31 +133,48 @@ func (c *Config) Validate() error {
 	if c.Defaults.RetentionLabel == "" {
 		return fmt.Errorf("defaults.retention_label cannot be empty")
 	}
-	if c.Defaults.KeepLast == 0 {
-		c.Defaults.KeepLast = 3
+	if c.Defaults.LegacyKeepMin != nil || c.Defaults.LegacyKeepLast != nil || c.Defaults.LegacyMinAge != nil || c.Defaults.LegacyMaxAge != nil {
+		// Legacy count/age fields cannot be translated exactly into age-target
+		// slots. Loading them selects the new defaults, and clearing these
+		// pointers ensures the next Save writes only the new schema.
+		c.Defaults.LegacyKeepMin = nil
+		c.Defaults.LegacyKeepLast = nil
+		c.Defaults.LegacyMinAge = nil
+		c.Defaults.LegacyMaxAge = nil
+		c.LegacyRetentionFields = true
+		if c.Defaults.RetentionLabel == legacyRetentionLabel {
+			c.Defaults.RetentionLabel = DefaultRetentionLabel
+		}
 	}
-	if c.Defaults.KeepLast < 1 {
-		return fmt.Errorf("defaults.keep_last must be at least 1")
+	if c.Defaults.KeepMax == 0 {
+		c.Defaults.KeepMax = 5
 	}
-	if c.Defaults.KeepMin < 1 {
-		return fmt.Errorf("defaults.keep_min must be at least 1")
+	if c.Defaults.KeepMax < 1 {
+		return fmt.Errorf("defaults.keep_max must be at least 1")
 	}
-	if c.Defaults.KeepMin > c.Defaults.KeepLast {
-		return fmt.Errorf("defaults.keep_min cannot exceed defaults.keep_last")
+	if c.Defaults.KeepLatest == 0 {
+		c.Defaults.KeepLatest = 2
 	}
-	minAge, err := ParseRetentionDuration(c.Defaults.MinAgeRaw)
-	if err != nil {
-		return fmt.Errorf("defaults.min_age must be zero or a valid retention duration: %w", err)
+	if c.Defaults.KeepLatest < 1 {
+		return fmt.Errorf("defaults.keep_latest must be at least 1")
 	}
-	maxAge, err := ParseRetentionDuration(c.Defaults.MaxAgeRaw)
-	if err != nil {
-		return fmt.Errorf("defaults.max_age must be zero or a valid retention duration: %w", err)
+	if c.Defaults.KeepLatest > c.Defaults.KeepMax {
+		return fmt.Errorf("defaults.keep_latest cannot exceed defaults.keep_max")
 	}
-	if minAge > 0 && maxAge > 0 && minAge > maxAge {
-		return fmt.Errorf("defaults.min_age cannot exceed defaults.max_age")
+	if c.Defaults.KeepLatest+len(c.Defaults.KeepTargetsRaw) > c.Defaults.KeepMax {
+		return fmt.Errorf("defaults.keep_latest plus the number of defaults.keep_targets cannot exceed defaults.keep_max")
 	}
-	c.Defaults.MinAge = minAge
-	c.Defaults.MaxAge = maxAge
+	c.Defaults.KeepTargets = make([]time.Duration, len(c.Defaults.KeepTargetsRaw))
+	for i, raw := range c.Defaults.KeepTargetsRaw {
+		target, err := ParseRetentionDuration(raw)
+		if err != nil || target <= 0 {
+			return fmt.Errorf("defaults.keep_targets[%d] must be a positive retention duration", i)
+		}
+		if i > 0 && target <= c.Defaults.KeepTargets[i-1] {
+			return fmt.Errorf("defaults.keep_targets must be ordered from youngest to oldest without duplicates")
+		}
+		c.Defaults.KeepTargets[i] = target
+	}
 	if c.Defaults.SnapshotName == "" {
 		return fmt.Errorf("defaults.snapshot_name cannot be empty")
 	}
@@ -204,14 +226,14 @@ func ValidateServerRef(ref string) error {
 func (c Config) Policy() Policy {
 	return Policy{
 		LabelSelector: c.Defaults.LabelSelector, RetentionLabel: c.Defaults.RetentionLabel,
-		KeepMin: c.Defaults.KeepMin, KeepLast: c.Defaults.KeepLast,
-		MinAge: c.Defaults.MinAge, MaxAge: c.Defaults.MaxAge, SnapshotName: c.Defaults.SnapshotName,
+		KeepMax: c.Defaults.KeepMax, KeepLatest: c.Defaults.KeepLatest,
+		KeepTargets: append([]time.Duration(nil), c.Defaults.KeepTargets...), SnapshotName: c.Defaults.SnapshotName,
 	}
 }
 
 // ParseRetentionDuration parses a fixed elapsed duration. It follows Go's
 // duration syntax and additionally treats d as 24 hours and w as 168 hours.
-// An empty string or any zero duration disables the corresponding age bound.
+// An empty string or any zero duration parses as zero.
 func ParseRetentionDuration(value string) (time.Duration, error) {
 	value = strings.TrimSpace(value)
 	if value == "" || value == "0" {

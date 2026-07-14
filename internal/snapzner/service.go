@@ -199,13 +199,13 @@ func plural(count int, singular, plural string) string {
 }
 
 func (s *Service) createSnapshot(ctx context.Context, server *hcloud.Server) (Event, bool) {
-	keep := s.Policy.KeepLast
+	keepMax := s.Policy.KeepMax
 	if raw, ok := server.Labels[s.Policy.RetentionLabel]; ok {
 		value, err := strconv.Atoi(raw)
 		if err != nil || value < 1 {
 			return s.event("backup", server.ID, "invalid server retention label", fmt.Errorf("%s=%q must be an integer of at least 1", s.Policy.RetentionLabel, raw)), false
 		}
-		keep = value
+		keepMax = value
 	}
 	labels := make(map[string]string, len(server.Labels)+10)
 	for k, v := range server.Labels {
@@ -220,7 +220,7 @@ func (s *Service) createSnapshot(ctx context.Context, server *hcloud.Server) (Ev
 	labels[metadataPrefix+"location"] = server.Location.Name
 	labels[metadataPrefix+"ipv4"] = strconv.FormatBool(!server.PublicNet.IPv4.IsUnspecified())
 	labels[metadataPrefix+"ipv6"] = strconv.FormatBool(!server.PublicNet.IPv6.IsUnspecified())
-	labels[metadataPrefix+"keep-last"] = strconv.Itoa(keep)
+	labels[metadataPrefix+"keep-max"] = strconv.Itoa(keepMax)
 	firewalls, err := s.Cloud.DirectFirewallIDs(ctx, server.ID)
 	if err != nil {
 		return s.event("backup", server.ID, "could not inspect directly attached firewalls", err), false
@@ -277,15 +277,15 @@ func (s *Service) prune(ctx context.Context, apply bool, restrict map[int64]bool
 	}
 	var events []Event
 	now := time.Now().UTC()
-	for sourceID, group := range groups {
+	for _, group := range groups {
 		sort.Slice(group, func(i, j int) bool { return group[i].Created.After(group[j].Created) })
 		for _, image := range PruneCandidates(group, s.Policy, now) {
 			if image.Protection.Delete && !force {
-				events = append(events, s.event("prune", image.ID, "snapshot is deletion-protected; retained", nil))
+				events = append(events, s.event("prune", image.ID, "retained deletion-protected "+SnapshotSummary(image), nil))
 				continue
 			}
 			if !apply {
-				events = append(events, s.event("prune", image.ID, fmt.Sprintf("would delete snapshot for source %d", sourceID), nil))
+				events = append(events, s.event("prune", image.ID, "would delete "+SnapshotSummary(image), nil))
 				continue
 			}
 			if image.Protection.Delete {
@@ -298,7 +298,7 @@ func (s *Service) prune(ctx context.Context, apply bool, restrict map[int64]bool
 			if err != nil {
 				events = append(events, s.event("prune", image.ID, "snapshot deletion failed", err))
 			} else {
-				events = append(events, s.event("prune", image.ID, fmt.Sprintf("deleted snapshot for source %d", sourceID), nil))
+				events = append(events, s.event("prune", image.ID, "deleted "+SnapshotSummary(image), nil))
 			}
 		}
 	}
@@ -308,35 +308,61 @@ func (s *Service) prune(ctx context.Context, apply bool, restrict map[int64]bool
 	return events
 }
 
+// SnapshotSummary formats the identifying fields shared by snapshot listing
+// and retention output.
+func SnapshotSummary(image *hcloud.Image) string {
+	managed := image.Labels[metadataPrefix+"managed"] == "v1"
+	return fmt.Sprintf("%s | managed=%t | source=%s | created=%s", image.Description, managed, image.Labels[metadataPrefix+"source-name"], image.Created.UTC().Format(time.RFC3339))
+}
+
 // PruneCandidates returns deletable snapshots from an input ordered newest
-// first. KeepMin is an absolute floor; MaxAge may override KeepLast but never
-// KeepMin. The newest snapshot carries any per-server KeepLast override.
+// first. It retains KeepLatest snapshots, then the newest distinct snapshot at
+// least as old as each age target. The newest snapshot carries any per-server
+// KeepMax override. The retained set never exceeds KeepMax.
 func PruneCandidates(images []*hcloud.Image, policy config.Policy, now time.Time) []*hcloud.Image {
-	keepMin := policy.KeepMin
-	if keepMin < 1 {
-		keepMin = 1
-	}
-	keepLast := policy.KeepLast
+	keepMax := policy.KeepMax
 	if len(images) > 0 {
-		if value, err := strconv.Atoi(images[0].Labels[metadataPrefix+"keep-last"]); err == nil && value >= 1 {
-			keepLast = value
+		if value, err := strconv.Atoi(images[0].Labels[metadataPrefix+"keep-max"]); err == nil && value >= 1 {
+			keepMax = value
 		}
 	}
-	if keepLast < keepMin {
-		keepLast = keepMin
+	if keepMax < 1 {
+		keepMax = 1
+	}
+	keepLatest := policy.KeepLatest
+	if keepLatest < 1 {
+		keepLatest = 1
+	}
+	if keepLatest > keepMax {
+		keepLatest = keepMax
+	}
+
+	retained := make([]bool, len(images))
+	retainedCount := keepLatest
+	if retainedCount > len(images) {
+		retainedCount = len(images)
+	}
+	for i := 0; i < retainedCount; i++ {
+		retained[i] = true
+	}
+	for _, target := range policy.KeepTargets {
+		if retainedCount >= keepMax {
+			break
+		}
+		cutoff := now.Add(-target)
+		for i, image := range images {
+			if retained[i] || image.Created.After(cutoff) {
+				continue
+			}
+			retained[i] = true
+			retainedCount++
+			break
+		}
 	}
 
 	var candidates []*hcloud.Image
-	for index, image := range images {
-		if index < keepMin {
-			continue
-		}
-		age := now.Sub(image.Created)
-		if policy.MaxAge > 0 && age >= policy.MaxAge {
-			candidates = append(candidates, image)
-			continue
-		}
-		if index >= keepLast && (policy.MinAge <= 0 || age >= policy.MinAge) {
+	for i, image := range images {
+		if !retained[i] {
 			candidates = append(candidates, image)
 		}
 	}

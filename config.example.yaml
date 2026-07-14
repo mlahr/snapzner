@@ -2,11 +2,10 @@ version: 1
 
 defaults:
   label_selector: "AUTOBACKUP=true"
-  retention_label: "AUTOBACKUP.KEEP-LAST"
-  keep_min: 1
-  keep_last: 3
-  min_age: 24h
-  max_age: 30d
+  retention_label: "AUTOBACKUP.KEEP-MAX"
+  keep_max: 5
+  keep_latest: 2
+  keep_targets: [1d, 1w, 2w]
   snapshot_name: "%name%-%timestamp%"
   operation_timeout: 1h
   project_concurrency: 4

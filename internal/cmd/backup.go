@@ -136,7 +136,7 @@ func appendUnique(values []string, value string) []string {
 }
 
 func (a *app) runFilteredBackup(ctx context.Context, projectNames []string, targets map[string][]string, report func(snapzner.Progress)) error {
-	cfg, err := config.Load(a.configPath)
+	cfg, err := a.loadConfig()
 	if err != nil {
 		return err
 	}
@@ -229,7 +229,7 @@ func (a *app) runFilteredBackup(ctx context.Context, projectNames []string, targ
 }
 
 func (a *app) runDiscoveredIDBackup(ctx context.Context, ids []int64, report func(snapzner.Progress)) error {
-	cfg, err := config.Load(a.configPath)
+	cfg, err := a.loadConfig()
 	if err != nil {
 		return err
 	}
