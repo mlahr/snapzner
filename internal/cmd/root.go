@@ -183,7 +183,10 @@ func (a *app) snapshotsCommand() *cobra.Command {
 			}
 			events := make([]snapzner.Event, 0, len(images))
 			for _, image := range images {
-				events = append(events, snapzner.Event{Project: svc.Project, Operation: "list", ResourceID: image.ID, Message: snapzner.SnapshotSummary(image)})
+				events = append(events, snapzner.Event{
+					Project: svc.Project, Operation: "list", ResourceID: image.ID,
+					Message: snapzner.SnapshotSummary(image), DisplayColumns: snapzner.SnapshotDisplayColumns(image),
+				})
 			}
 			return events
 		})
@@ -394,12 +397,38 @@ func (a *app) printEvents(events []snapzner.Event) {
 		_ = json.NewEncoder(a.out).Encode(events)
 		return
 	}
+	projectWidth := 0
+	var columnWidths []int
+	for _, e := range events {
+		if (a.quiet && e.Error == "") || len(e.DisplayColumns) == 0 {
+			continue
+		}
+		if e.Project != "" {
+			projectWidth = max(projectWidth, len([]rune("["+e.Project+"]")))
+		}
+		if len(columnWidths) < len(e.DisplayColumns) {
+			columnWidths = append(columnWidths, make([]int, len(e.DisplayColumns)-len(columnWidths))...)
+		}
+		for i, column := range e.DisplayColumns {
+			columnWidths[i] = max(columnWidths[i], len([]rune(column)))
+		}
+	}
 	for _, e := range events {
 		if a.quiet && e.Error == "" {
 			continue
 		}
 		line := e.Message
-		if e.Project != "" {
+		if len(e.DisplayColumns) > 0 {
+			columns := make([]string, len(e.DisplayColumns))
+			for i, column := range e.DisplayColumns {
+				columns[i] = column + strings.Repeat(" ", columnWidths[i]-len([]rune(column)))
+			}
+			line = strings.Join(columns, " | ")
+			if e.Project != "" {
+				project := "[" + e.Project + "]"
+				line = project + strings.Repeat(" ", projectWidth-len([]rune(project))) + " " + line
+			}
+		} else if e.Project != "" {
 			line = fmt.Sprintf("[%s] %s", e.Project, line)
 		}
 		if e.ResourceID != 0 {

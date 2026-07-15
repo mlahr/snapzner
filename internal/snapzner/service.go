@@ -15,11 +15,12 @@ import (
 )
 
 type Event struct {
-	Project    string `json:"project,omitempty"`
-	Operation  string `json:"operation"`
-	ResourceID int64  `json:"resource_id,omitempty"`
-	Message    string `json:"message"`
-	Error      string `json:"error,omitempty"`
+	Project        string   `json:"project,omitempty"`
+	Operation      string   `json:"operation"`
+	ResourceID     int64    `json:"resource_id,omitempty"`
+	Message        string   `json:"message"`
+	Error          string   `json:"error,omitempty"`
+	DisplayColumns []string `json:"-"`
 }
 
 // Progress describes transient backup status. It is not a final result event.
@@ -311,8 +312,19 @@ func (s *Service) prune(ctx context.Context, apply bool, restrict map[int64]bool
 // SnapshotSummary formats the identifying fields shared by snapshot listing
 // and retention output.
 func SnapshotSummary(image *hcloud.Image) string {
+	return strings.Join(SnapshotDisplayColumns(image), " | ")
+}
+
+// SnapshotDisplayColumns returns the human-readable fields used by snapshot
+// list output. Callers may pad these values without changing SnapshotSummary.
+func SnapshotDisplayColumns(image *hcloud.Image) []string {
 	managed := image.Labels[metadataPrefix+"managed"] == "v1"
-	return fmt.Sprintf("%s | managed=%t | source=%s | created=%s", image.Description, managed, image.Labels[metadataPrefix+"source-name"], image.Created.UTC().Format(time.RFC3339))
+	return []string{
+		image.Description,
+		fmt.Sprintf("managed=%t", managed),
+		"source=" + image.Labels[metadataPrefix+"source-name"],
+		"created=" + image.Created.UTC().Format(time.RFC3339),
+	}
 }
 
 // PruneCandidates returns deletable snapshots from an input ordered newest

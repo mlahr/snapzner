@@ -87,6 +87,26 @@ func TestSnapshotAndProtectionFlags(t *testing.T) {
 	}
 }
 
+func TestPrintEventsAlignsSnapshotListColumns(t *testing.T) {
+	var output bytes.Buffer
+	a := &app{out: &output, errOut: io.Discard}
+	a.printEvents([]snapzner.Event{
+		{
+			Project: "pdfdancer", Operation: "list", ResourceID: 408358487,
+			Message: "ignored", DisplayColumns: []string{"pdfdancer-api-production-1784019793", "managed=true", "source=pdfdancer-api-production", "created=2026-07-14T09:03:13Z"},
+		},
+		{
+			Project: "root", Operation: "list", ResourceID: 408358488,
+			Message: "ignored", DisplayColumns: []string{"root-v2-1784019793", "managed=true", "source=root-v2", "created=2026-07-14T09:03:13Z"},
+		},
+	})
+	want := "[pdfdancer] pdfdancer-api-production-1784019793 | managed=true | source=pdfdancer-api-production | created=2026-07-14T09:03:13Z (id=408358487)\n" +
+		"[root]      root-v2-1784019793                  | managed=true | source=root-v2                  | created=2026-07-14T09:03:13Z (id=408358488)\n"
+	if output.String() != want {
+		t.Fatalf("snapshot list output = %q, want %q", output.String(), want)
+	}
+}
+
 func TestBackupProgressReporterHonorsQuiet(t *testing.T) {
 	var output bytes.Buffer
 	reporter := newBackupProgressRenderer(&output, true)
