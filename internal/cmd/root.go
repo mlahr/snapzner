@@ -14,6 +14,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/mattn/go-runewidth"
 	"github.com/mlahr/snapzner/internal/config"
 	"github.com/mlahr/snapzner/internal/credentials"
 	"github.com/mlahr/snapzner/internal/snapzner"
@@ -398,19 +399,24 @@ func (a *app) printEvents(events []snapzner.Event) {
 		return
 	}
 	projectWidth := 0
+	messageWidth := 0
 	var columnWidths []int
 	for _, e := range events {
-		if (a.quiet && e.Error == "") || len(e.DisplayColumns) == 0 {
+		if a.quiet && e.Error == "" {
 			continue
 		}
 		if e.Project != "" {
-			projectWidth = max(projectWidth, len([]rune("["+e.Project+"]")))
+			projectWidth = max(projectWidth, runewidth.StringWidth("["+e.Project+"]"))
+		}
+		if len(e.DisplayColumns) == 0 {
+			messageWidth = max(messageWidth, runewidth.StringWidth(e.Message))
+			continue
 		}
 		if len(columnWidths) < len(e.DisplayColumns) {
 			columnWidths = append(columnWidths, make([]int, len(e.DisplayColumns)-len(columnWidths))...)
 		}
 		for i, column := range e.DisplayColumns {
-			columnWidths[i] = max(columnWidths[i], len([]rune(column)))
+			columnWidths[i] = max(columnWidths[i], runewidth.StringWidth(column))
 		}
 	}
 	for _, e := range events {
@@ -421,15 +427,14 @@ func (a *app) printEvents(events []snapzner.Event) {
 		if len(e.DisplayColumns) > 0 {
 			columns := make([]string, len(e.DisplayColumns))
 			for i, column := range e.DisplayColumns {
-				columns[i] = column + strings.Repeat(" ", columnWidths[i]-len([]rune(column)))
+				columns[i] = padRight(column, columnWidths[i])
 			}
 			line = strings.Join(columns, " | ")
-			if e.Project != "" {
-				project := "[" + e.Project + "]"
-				line = project + strings.Repeat(" ", projectWidth-len([]rune(project))) + " " + line
-			}
-		} else if e.Project != "" {
-			line = fmt.Sprintf("[%s] %s", e.Project, line)
+		} else if e.ResourceID != 0 {
+			line = padRight(line, messageWidth)
+		}
+		if e.Project != "" {
+			line = padRight("["+e.Project+"]", projectWidth) + " " + line
 		}
 		if e.ResourceID != 0 {
 			line += fmt.Sprintf(" (id=%d)", e.ResourceID)
@@ -440,6 +445,10 @@ func (a *app) printEvents(events []snapzner.Event) {
 			fmt.Fprintln(a.out, line)
 		}
 	}
+}
+
+func padRight(value string, width int) string {
+	return value + strings.Repeat(" ", width-runewidth.StringWidth(value))
 }
 
 func (a *app) confirm(prompt string) error {

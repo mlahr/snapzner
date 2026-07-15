@@ -282,11 +282,11 @@ func (s *Service) prune(ctx context.Context, apply bool, restrict map[int64]bool
 		sort.Slice(group, func(i, j int) bool { return group[i].Created.After(group[j].Created) })
 		for _, image := range PruneCandidates(group, s.Policy, now) {
 			if image.Protection.Delete && !force {
-				events = append(events, s.event("prune", image.ID, "retained deletion-protected "+SnapshotSummary(image), nil))
+				events = append(events, s.snapshotEvent("prune", "retained deletion-protected", image, nil))
 				continue
 			}
 			if !apply {
-				events = append(events, s.event("prune", image.ID, "would delete "+SnapshotSummary(image), nil))
+				events = append(events, s.snapshotEvent("prune", "would delete", image, nil))
 				continue
 			}
 			if image.Protection.Delete {
@@ -299,7 +299,7 @@ func (s *Service) prune(ctx context.Context, apply bool, restrict map[int64]bool
 			if err != nil {
 				events = append(events, s.event("prune", image.ID, "snapshot deletion failed", err))
 			} else {
-				events = append(events, s.event("prune", image.ID, "deleted "+SnapshotSummary(image), nil))
+				events = append(events, s.snapshotEvent("prune", "deleted", image, nil))
 			}
 		}
 	}
@@ -307,6 +307,12 @@ func (s *Service) prune(ctx context.Context, apply bool, restrict map[int64]bool
 		events = append(events, s.event("prune", 0, "no snapshots exceed retention", nil))
 	}
 	return events
+}
+
+func (s *Service) snapshotEvent(operation, action string, image *hcloud.Image, err error) Event {
+	event := s.event(operation, image.ID, action+" "+SnapshotSummary(image), err)
+	event.DisplayColumns = append([]string{action}, SnapshotDisplayColumns(image)...)
+	return event
 }
 
 // SnapshotSummary formats the identifying fields shared by snapshot listing

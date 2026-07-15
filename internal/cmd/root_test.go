@@ -107,6 +107,20 @@ func TestPrintEventsAlignsSnapshotListColumns(t *testing.T) {
 	}
 }
 
+func TestPrintEventsAlignsGeneralResultRows(t *testing.T) {
+	var output bytes.Buffer
+	a := &app{out: &output, errOut: io.Discard}
+	a.printEvents([]snapzner.Event{
+		{Project: "production", Operation: "delete", ResourceID: 9, Message: "snapshot deleted"},
+		{Project: "dev", Operation: "delete", ResourceID: 123, Message: "snapshot deletion failed later"},
+	})
+	want := "[production] snapshot deleted               (id=9)\n" +
+		"[dev]        snapshot deletion failed later (id=123)\n"
+	if output.String() != want {
+		t.Fatalf("result output = %q, want %q", output.String(), want)
+	}
+}
+
 func TestBackupProgressReporterHonorsQuiet(t *testing.T) {
 	var output bytes.Buffer
 	reporter := newBackupProgressRenderer(&output, true)
