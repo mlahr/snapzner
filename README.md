@@ -12,6 +12,7 @@ processed independently with bounded concurrency.
 - Multiple Hetzner Cloud projects in one invocation.
 - Label-selector and explicit include/exclude server selection.
 - Per-server bounded retention with latest and age-target recovery points.
+- Reversible snapshot pins that no prune mode can override.
 - Managed-snapshot ownership labels that prevent accidental pruning of manual snapshots.
 - Previewable standalone pruning and exact-ID deletion.
 - Clone replay to a newly billed server.
@@ -158,6 +159,11 @@ Deletion-protected snapshots are retained unless pruning uses `--force`.
 Consequently, protected snapshots can make the actual snapshot count exceed
 `keep_max`.
 
+Snapshots carrying `snapzner.mlahr.dev/pinned=v1` are excluded before
+retention is evaluated. Pins do not consume retention slots, cannot be
+overridden by `prune --force`, and can therefore also make the actual snapshot
+count exceed `keep_max`.
+
 Configurations containing the former `keep_min`, `keep_last`, `min_age`, and
 `max_age` fields remain loadable. Because that policy has no exact age-target
 equivalent, a legacy-only configuration uses the new default retention policy;
@@ -257,25 +263,31 @@ snapzner prune --apply
 ```
 
 Only snapshots carrying `snapzner.mlahr.dev/managed=v1` are automatically
-pruned. Deletion-protected snapshots are reported and retained. To include
-them deliberately, use `snapzner prune --apply --force`; Snapzner disables
-their deletion protection before deleting them.
+pruned. Pinned snapshots are always reported and retained, including with
+`--force`. Deletion-protected snapshots are reported and retained unless
+pruning uses `snapzner prune --apply --force`; Snapzner then disables their
+deletion protection before deleting them.
 
-List managed snapshots or delete exact IDs:
+List managed snapshots, pin or unpin exact IDs, or delete exact IDs:
 
 ```sh
 snapzner snapshots list --project production
+snapzner snapshots pin --project production --id 123
+snapzner snapshots unpin --project production --id 123
 snapzner snapshots delete --project production --id 123 --id 456
 ```
 
 Use `snapzner snapshots list --all --project production` to include snapshots
 not managed by Snapzner. List output identifies each snapshot as managed or
-unmanaged and includes its image ID.
+unmanaged and pinned or unpinned, and includes its image ID. Pinning adds only
+Snapzner's metadata label; it does not enable Hetzner deletion protection or
+make an unmanaged snapshot managed.
 
 Deleting an unmanaged or deletion-protected snapshot requires both an exact ID
 and `--force`. For a protected snapshot, Snapzner disables deletion protection
-before deletion. Backup, system, and app images are never deleted by this
-command. Interactive confirmation is required unless `--yes` is supplied.
+before deletion. A pinned snapshot cannot be deleted even with `--force`; it
+must be unpinned first. Backup, system, and app images are never deleted by
+this command. Interactive confirmation is required unless `--yes` is supplied.
 
 ## Replay snapshots
 

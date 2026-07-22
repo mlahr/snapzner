@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -107,10 +108,10 @@ func TestParseDiscoveredServerIDs(t *testing.T) {
 }
 
 func TestFilteredBackupValidatesEveryProjectBeforeMutation(t *testing.T) {
-	var mutations int
+	var mutations atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/actions/create_image") {
-			mutations++
+			mutations.Add(1)
 			http.Error(w, "unexpected mutation", http.StatusInternalServerError)
 			return
 		}
@@ -165,8 +166,8 @@ func TestFilteredBackupValidatesEveryProjectBeforeMutation(t *testing.T) {
 	if err == nil || !strings.Contains(errors.String(), "not selected by project configuration") {
 		t.Fatalf("error = %v, stderr = %q", err, errors.String())
 	}
-	if mutations != 0 {
-		t.Fatalf("created %d snapshots before preflight completed", mutations)
+	if got := mutations.Load(); got != 0 {
+		t.Fatalf("created %d snapshots before preflight completed", got)
 	}
 
 	errors.Reset()
@@ -177,8 +178,8 @@ func TestFilteredBackupValidatesEveryProjectBeforeMutation(t *testing.T) {
 	if err == nil || strings.Contains(errors.String(), "not selected by project configuration") {
 		t.Fatalf("forced error = %v, stderr = %q", err, errors.String())
 	}
-	if mutations != 2 {
-		t.Fatalf("forced backup attempted %d snapshots, want 2", mutations)
+	if got := mutations.Load(); got != 2 {
+		t.Fatalf("forced backup attempted %d snapshots, want 2", got)
 	}
 }
 

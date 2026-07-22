@@ -300,10 +300,21 @@ func (s *Service) prune(ctx context.Context, apply bool, restrict map[int64]bool
 		groups[id] = append(groups[id], image)
 	}
 	var events []Event
+	candidateCount := 0
 	now := time.Now().UTC()
 	for _, group := range groups {
 		sort.Slice(group, func(i, j int) bool { return group[i].Created.After(group[j].Created) })
-		for _, image := range PruneCandidates(group, s.Policy, now) {
+		unpinned := make([]*hcloud.Image, 0, len(group))
+		for _, image := range group {
+			if isPinned(image) {
+				events = append(events, s.snapshotEvent("prune", "retained pinned", image, nil))
+				continue
+			}
+			unpinned = append(unpinned, image)
+		}
+		candidates := PruneCandidates(unpinned, s.Policy, now)
+		candidateCount += len(candidates)
+		for _, image := range candidates {
 			if image.Protection.Delete && !force {
 				events = append(events, s.snapshotEvent("prune", "retained deletion-protected", image, nil))
 				continue
@@ -326,7 +337,7 @@ func (s *Service) prune(ctx context.Context, apply bool, restrict map[int64]bool
 			}
 		}
 	}
-	if len(events) == 0 {
+	if candidateCount == 0 {
 		events = append(events, s.event("prune", 0, "no snapshots exceed retention", nil))
 	}
 	return events
@@ -351,6 +362,7 @@ func SnapshotDisplayColumns(image *hcloud.Image) []string {
 	return []string{
 		image.Description,
 		fmt.Sprintf("managed=%t", managed),
+		fmt.Sprintf("pinned=%t", isPinned(image)),
 		"source=" + image.Labels[metadataPrefix+"source-name"],
 		"created=" + image.Created.UTC().Format(time.RFC3339),
 	}
@@ -437,6 +449,10 @@ func (s *Service) DeleteSnapshots(ctx context.Context, ids []int64, force bool) 
 			events = append(events, s.event("delete", id, "refusing to delete a non-snapshot image", fmt.Errorf("image type is %s", image.Type)))
 			continue
 		}
+		if isPinned(image) {
+			events = append(events, s.event("delete", id, "snapshot is pinned", fmt.Errorf("unpin it before deletion")))
+			continue
+		}
 		if image.Labels[metadataPrefix+"managed"] != "v1" && !force {
 			events = append(events, s.event("delete", id, "refusing unmanaged snapshot", fmt.Errorf("pass --force to override")))
 			continue
@@ -459,6 +475,61 @@ func (s *Service) DeleteSnapshots(ctx context.Context, ids []int64, force bool) 
 		}
 	}
 	return events
+}
+
+// SetSnapshotPins sets or clears Snapzner's absolute prune exclusion for exact
+// snapshot IDs. Pinning does not change snapshot ownership or Hetzner deletion
+// protection.
+func (s *Service) SetSnapshotPins(ctx context.Context, ids []int64, pinned bool) []Event {
+	ctx, cancel := context.WithTimeout(ctx, s.Timeout)
+	defer cancel()
+	operation := "unpin"
+	doneMessage := "snapshot unpinned"
+	alreadyMessage := "snapshot already unpinned"
+	if pinned {
+		operation = "pin"
+		doneMessage = "snapshot pinned"
+		alreadyMessage = "snapshot already pinned"
+	}
+	var events []Event
+	for _, id := range ids {
+		image, _, err := s.Cloud.Client.Image.GetByID(ctx, id)
+		if err != nil {
+			events = append(events, s.event(operation, id, "could not read snapshot", err))
+			continue
+		}
+		if image == nil {
+			events = append(events, s.event(operation, id, "snapshot not found", fmt.Errorf("not found")))
+			continue
+		}
+		if image.Type != hcloud.ImageTypeSnapshot {
+			events = append(events, s.event(operation, id, "refusing to modify a non-snapshot image", fmt.Errorf("image type is %s", image.Type)))
+			continue
+		}
+		if isPinned(image) == pinned {
+			events = append(events, s.event(operation, id, alreadyMessage, nil))
+			continue
+		}
+		labels := make(map[string]string, len(image.Labels)+1)
+		for key, value := range image.Labels {
+			labels[key] = value
+		}
+		if pinned {
+			labels[pinnedMetadata] = "v1"
+		} else {
+			delete(labels, pinnedMetadata)
+		}
+		if _, _, err := s.Cloud.Client.Image.Update(ctx, image, hcloud.ImageUpdateOpts{Labels: labels}); err != nil {
+			events = append(events, s.event(operation, id, "could not update snapshot pin", err))
+			continue
+		}
+		events = append(events, s.event(operation, id, doneMessage, nil))
+	}
+	return events
+}
+
+func isPinned(image *hcloud.Image) bool {
+	return image.Labels[pinnedMetadata] == "v1"
 }
 
 func (s *Service) setImageDeleteProtection(ctx context.Context, image *hcloud.Image, enabled bool) error {

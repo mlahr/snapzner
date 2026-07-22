@@ -64,6 +64,8 @@ func TestSnapshotAndProtectionFlags(t *testing.T) {
 		flag string
 	}{
 		{[]string{"snapshots", "list"}, "all"},
+		{[]string{"snapshots", "pin"}, "id"},
+		{[]string{"snapshots", "unpin"}, "id"},
 		{[]string{"snapshots", "delete"}, "force"},
 		{[]string{"backup"}, "server"},
 		{[]string{"backup"}, "force"},
@@ -105,21 +107,38 @@ func TestBackupForceRequiresProjectScopedServer(t *testing.T) {
 	}
 }
 
+func TestSnapshotPinCommandsValidateProjectAndIDs(t *testing.T) {
+	for _, test := range []struct {
+		args     []string
+		contains string
+	}{
+		{args: []string{"snapshots", "pin", "--id", "99"}, contains: "requires exactly one --project"},
+		{args: []string{"snapshots", "unpin", "--project", "prod"}, contains: "at least one --id is required"},
+	} {
+		a := &app{out: io.Discard, errOut: io.Discard}
+		root := a.rootCommand()
+		root.SetArgs(test.args)
+		if err := root.Execute(); err == nil || !strings.Contains(err.Error(), test.contains) {
+			t.Fatalf("snapzner %s error = %v, want containing %q", strings.Join(test.args, " "), err, test.contains)
+		}
+	}
+}
+
 func TestPrintEventsAlignsSnapshotListColumns(t *testing.T) {
 	var output bytes.Buffer
 	a := &app{out: &output, errOut: io.Discard}
 	a.printEvents([]snapzner.Event{
 		{
 			Project: "pdfdancer", Operation: "list", ResourceID: 408358487,
-			Message: "ignored", DisplayColumns: []string{"pdfdancer-api-production-1784019793", "managed=true", "source=pdfdancer-api-production", "created=2026-07-14T09:03:13Z"},
+			Message: "ignored", DisplayColumns: []string{"pdfdancer-api-production-1784019793", "managed=true", "pinned=false", "source=pdfdancer-api-production", "created=2026-07-14T09:03:13Z"},
 		},
 		{
 			Project: "root", Operation: "list", ResourceID: 408358488,
-			Message: "ignored", DisplayColumns: []string{"root-v2-1784019793", "managed=true", "source=root-v2", "created=2026-07-14T09:03:13Z"},
+			Message: "ignored", DisplayColumns: []string{"root-v2-1784019793", "managed=true", "pinned=false", "source=root-v2", "created=2026-07-14T09:03:13Z"},
 		},
 	})
-	want := "[pdfdancer] pdfdancer-api-production-1784019793 | managed=true | source=pdfdancer-api-production | created=2026-07-14T09:03:13Z (id=408358487)\n" +
-		"[root]      root-v2-1784019793                  | managed=true | source=root-v2                  | created=2026-07-14T09:03:13Z (id=408358488)\n"
+	want := "[pdfdancer] pdfdancer-api-production-1784019793 | managed=true | pinned=false | source=pdfdancer-api-production | created=2026-07-14T09:03:13Z (id=408358487)\n" +
+		"[root]      root-v2-1784019793                  | managed=true | pinned=false | source=root-v2                  | created=2026-07-14T09:03:13Z (id=408358488)\n"
 	if output.String() != want {
 		t.Fatalf("snapshot list output = %q, want %q", output.String(), want)
 	}

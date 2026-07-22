@@ -182,7 +182,7 @@ func (a *app) pruneCommand() *cobra.Command {
 }
 
 func (a *app) snapshotsCommand() *cobra.Command {
-	root := &cobra.Command{Use: "snapshots", Short: "List and delete snapshots"}
+	root := &cobra.Command{Use: "snapshots", Short: "List, pin, unpin, and delete snapshots"}
 	var all bool
 	listCommand := &cobra.Command{Use: "list", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		return a.runProjects(cmd.Context(), func(ctx context.Context, svc *snapzner.Service, _ config.Project) []snapzner.Event {
@@ -202,6 +202,32 @@ func (a *app) snapshotsCommand() *cobra.Command {
 	}}
 	listCommand.Flags().BoolVar(&all, "all", false, "include snapshots not managed by Snapzner")
 	root.AddCommand(listCommand)
+	newPinCommand := func(name string, pinned bool) *cobra.Command {
+		var ids []int64
+		short := "Unpin explicitly identified snapshots"
+		if pinned {
+			short = "Pin explicitly identified snapshots"
+		}
+		command := &cobra.Command{Use: name, Short: short, Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+			if len(a.projects) != 1 {
+				return fmt.Errorf("snapshot %s requires exactly one --project", name)
+			}
+			if len(ids) == 0 {
+				return fmt.Errorf("at least one --id is required")
+			}
+			unlock, err := a.lock()
+			if err != nil {
+				return err
+			}
+			defer unlock()
+			return a.runProjects(cmd.Context(), func(ctx context.Context, svc *snapzner.Service, _ config.Project) []snapzner.Event {
+				return svc.SetSnapshotPins(ctx, ids, pinned)
+			})
+		}}
+		command.Flags().Int64SliceVar(&ids, "id", nil, "snapshot ID (repeatable)")
+		return command
+	}
+	root.AddCommand(newPinCommand("pin", true), newPinCommand("unpin", false))
 	var ids []int64
 	var force bool
 	deleteCommand := &cobra.Command{Use: "delete", Short: "Delete explicitly identified snapshots", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {

@@ -13,6 +13,7 @@ import (
 
 const managedSelector = "snapzner.mlahr.dev/managed=v1"
 const metadataPrefix = "snapzner.mlahr.dev/"
+const pinnedMetadata = metadataPrefix + "pinned"
 
 type Cloud struct{ Client *hcloud.Client }
 

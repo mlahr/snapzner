@@ -3,6 +3,7 @@ package snapzner
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,7 +31,7 @@ func TestSnapshotSummaryMatchesListAndPruneFormat(t *testing.T) {
 		Description: "root-1784030400", Created: created,
 		Labels: map[string]string{metadataPrefix + "managed": "v1", metadataPrefix + "source-name": "root"},
 	}
-	want := "root-1784030400 | managed=true | source=root | created=2026-07-14T12:00:00Z"
+	want := "root-1784030400 | managed=true | pinned=false | source=root | created=2026-07-14T12:00:00Z"
 	if got := SnapshotSummary(image); got != want {
 		t.Fatalf("summary = %q, want %q", got, want)
 	}
@@ -223,7 +224,7 @@ func TestPruneDryRunAndApplyUseSameAgeCandidates(t *testing.T) {
 	if len(dryRun) != 2 || len(deleted) != 0 {
 		t.Fatalf("dry run events = %#v, deleted = %#v", dryRun, deleted)
 	}
-	if !strings.Contains(dryRun[0].Message, "database-backup | managed=true | source=database | created=") {
+	if !strings.Contains(dryRun[0].Message, "database-backup | managed=true | pinned=false | source=database | created=") {
 		t.Fatalf("dry run message = %q", dryRun[0].Message)
 	}
 	applied := svc.Prune(context.Background(), true, false)
@@ -452,6 +453,149 @@ func TestDeleteSnapshotsWithoutForceRejectsUnmanagedSnapshot(t *testing.T) {
 	svc := Service{Project: "prod", Cloud: &Cloud{Client: client}, Timeout: time.Second}
 	events := svc.DeleteSnapshots(context.Background(), []int64{99}, false)
 	if len(events) != 1 || !strings.Contains(events[0].Error, "--force") {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestSetSnapshotPinsPreservesLabelsAndIsIdempotent(t *testing.T) {
+	now := time.Now().UTC()
+	labels := map[string]string{
+		metadataPrefix + "managed": "v1",
+		"owner":                    "database-team",
+	}
+	updates := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/images/99", func(w http.ResponseWriter, r *http.Request) {
+		image := schema.Image{ID: 99, Status: "available", Type: "snapshot", Created: &now, Labels: labels}
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(t, w, schema.ImageGetResponse{Image: image})
+		case http.MethodPut:
+			var request schema.ImageUpdateRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			if request.Labels == nil {
+				t.Fatal("label update missing")
+			}
+			labels = *request.Labels
+			updates++
+			image.Labels = labels
+			writeJSON(t, w, schema.ImageUpdateResponse{Image: image})
+		default:
+			t.Errorf("unexpected method %s", r.Method)
+		}
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := hcloud.NewClient(hcloud.WithToken("test"), hcloud.WithEndpoint(server.URL))
+	svc := Service{Project: "prod", Cloud: &Cloud{Client: client}, Timeout: time.Second}
+
+	for _, pinned := range []bool{true, true, false, false} {
+		events := svc.SetSnapshotPins(context.Background(), []int64{99}, pinned)
+		if len(events) != 1 || events[0].Error != "" {
+			t.Fatalf("pinned=%t events = %#v", pinned, events)
+		}
+		if labels["owner"] != "database-team" {
+			t.Fatalf("unrelated labels changed: %#v", labels)
+		}
+		if (labels[pinnedMetadata] == "v1") != pinned {
+			t.Fatalf("pinned=%t labels = %#v", pinned, labels)
+		}
+	}
+	if updates != 2 {
+		t.Fatalf("updates = %d, want 2", updates)
+	}
+}
+
+func TestSetSnapshotPinsReportsPartialFailures(t *testing.T) {
+	now := time.Now().UTC()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/images/77", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		if err := json.NewEncoder(w).Encode(schema.ErrorResponse{Error: schema.Error{Code: "not_found"}}); err != nil {
+			t.Error(err)
+		}
+	})
+	mux.HandleFunc("/images/88", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, schema.ImageGetResponse{Image: schema.Image{ID: 88, Type: "system", Created: &now}})
+	})
+	mux.HandleFunc("/images/99", func(w http.ResponseWriter, r *http.Request) {
+		image := schema.Image{ID: 99, Type: "snapshot", Created: &now, Labels: map[string]string{pinnedMetadata: "v1"}}
+		if r.Method == http.MethodGet {
+			writeJSON(t, w, schema.ImageGetResponse{Image: image})
+			return
+		}
+		t.Errorf("unexpected idempotent mutation: %s", r.Method)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := hcloud.NewClient(hcloud.WithToken("test"), hcloud.WithEndpoint(server.URL))
+	svc := Service{Project: "prod", Cloud: &Cloud{Client: client}, Timeout: time.Second}
+	events := svc.SetSnapshotPins(context.Background(), []int64{77, 88, 99}, true)
+	if len(events) != 3 || events[0].Message != "snapshot not found" || events[0].Error == "" || events[1].Error == "" || events[2].Error != "" || events[2].Message != "snapshot already pinned" {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestPruneAlwaysRetainsPinnedSnapshotsOutsideRetention(t *testing.T) {
+	now := time.Now().UTC()
+	created := []time.Time{now, now.Add(-time.Hour), now.Add(-2 * time.Hour)}
+	var deleted []int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/images", func(w http.ResponseWriter, _ *http.Request) {
+		images := []schema.Image{
+			{ID: 3, Status: "available", Type: "snapshot", Created: &created[0], Labels: map[string]string{metadataPrefix + "managed": "v1", metadataPrefix + "source-id": "42", pinnedMetadata: "v1"}},
+			{ID: 2, Status: "available", Type: "snapshot", Created: &created[1], Labels: map[string]string{metadataPrefix + "managed": "v1", metadataPrefix + "source-id": "42"}},
+			{ID: 1, Status: "available", Type: "snapshot", Created: &created[2], Labels: map[string]string{metadataPrefix + "managed": "v1", metadataPrefix + "source-id": "42"}},
+		}
+		writeJSON(t, w, map[string]any{"images": images, "meta": map[string]any{"pagination": map[string]any{"page": 1, "last_page": 1}}})
+	})
+	for _, id := range []int64{1, 2, 3} {
+		id := id
+		mux.HandleFunc(fmt.Sprintf("/images/%d", id), func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodDelete {
+				t.Errorf("unexpected method for image %d: %s", id, r.Method)
+			}
+			deleted = append(deleted, id)
+			w.WriteHeader(http.StatusNoContent)
+		})
+	}
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := hcloud.NewClient(hcloud.WithToken("test"), hcloud.WithEndpoint(server.URL))
+	svc := Service{
+		Project: "prod", Cloud: &Cloud{Client: client}, Timeout: time.Second,
+		Policy: config.Policy{KeepMax: 1, KeepLatest: 1},
+	}
+	events := svc.Prune(context.Background(), true, true)
+	if len(events) != 2 || events[0].ResourceID != 3 || !strings.Contains(events[0].Message, "retained pinned") || events[1].ResourceID != 1 {
+		t.Fatalf("events = %#v", events)
+	}
+	if len(deleted) != 1 || deleted[0] != 1 {
+		t.Fatalf("deleted = %v, want [1]", deleted)
+	}
+}
+
+func TestDeleteSnapshotsForceRejectsPinnedSnapshot(t *testing.T) {
+	now := time.Now().UTC()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/images/99", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("unexpected mutation of pinned snapshot: %s", r.Method)
+		}
+		writeJSON(t, w, schema.ImageGetResponse{Image: schema.Image{
+			ID: 99, Status: "available", Type: "snapshot", Created: &now,
+			Protection: schema.ImageProtection{Delete: true}, Labels: map[string]string{pinnedMetadata: "v1"},
+		}})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := hcloud.NewClient(hcloud.WithToken("test"), hcloud.WithEndpoint(server.URL))
+	svc := Service{Project: "prod", Cloud: &Cloud{Client: client}, Timeout: time.Second}
+	events := svc.DeleteSnapshots(context.Background(), []int64{99}, true)
+	if len(events) != 1 || !strings.Contains(events[0].Error, "unpin it before deletion") {
 		t.Fatalf("events = %#v", events)
 	}
 }
