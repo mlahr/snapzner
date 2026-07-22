@@ -135,7 +135,7 @@ func appendUnique(values []string, value string) []string {
 	return append(values, value)
 }
 
-func (a *app) runFilteredBackup(ctx context.Context, projectNames []string, targets map[string][]string, report func(snapzner.Progress)) error {
+func (a *app) runFilteredBackup(ctx context.Context, projectNames []string, targets map[string][]string, force bool, report func(snapzner.Progress)) error {
 	cfg, err := a.loadConfig()
 	if err != nil {
 		return err
@@ -182,7 +182,13 @@ func (a *app) runFilteredBackup(ctx context.Context, projectNames []string, targ
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			run := runs[index]
-			servers, err := run.service.SelectBackupServers(ctx, run.project, targets[run.project.Name])
+			var servers []*hcloud.Server
+			var err error
+			if force {
+				servers, err = run.service.ResolveBackupServers(ctx, targets[run.project.Name])
+			} else {
+				servers, err = run.service.SelectBackupServers(ctx, run.project, targets[run.project.Name])
+			}
 			selectionResults <- selectionResult{index: index, servers: servers, err: err}
 		}()
 	}

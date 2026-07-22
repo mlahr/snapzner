@@ -114,10 +114,17 @@ func (a *app) projectsCommand() *cobra.Command {
 
 func (a *app) backupCommand() *cobra.Command {
 	var servers []string
+	var force bool
 	command := &cobra.Command{Use: "backup", Short: "Create snapshots and enforce retention", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		if force && len(servers) == 0 {
+			return fmt.Errorf("--force requires at least one --server")
+		}
 		discoveredIDs, discover, err := parseDiscoveredServerIDs(servers, a.projects)
 		if err != nil {
 			return err
+		}
+		if force && discover {
+			return fmt.Errorf("--force with an unqualified server ID requires --project or a PROJECT/SERVER target")
 		}
 		var targets map[string][]string
 		var projectNames []string
@@ -138,7 +145,7 @@ func (a *app) backupCommand() *cobra.Command {
 			return a.runDiscoveredIDBackup(cmd.Context(), discoveredIDs, progress.Report)
 		}
 		if len(servers) > 0 {
-			return a.runFilteredBackup(cmd.Context(), projectNames, targets, progress.Report)
+			return a.runFilteredBackup(cmd.Context(), projectNames, targets, force, progress.Report)
 		}
 		return a.runProjects(cmd.Context(), func(ctx context.Context, svc *snapzner.Service, p config.Project) []snapzner.Event {
 			svc.OnProgress = progress.Report
@@ -146,6 +153,7 @@ func (a *app) backupCommand() *cobra.Command {
 		})
 	}}
 	command.Flags().StringArrayVar(&servers, "server", nil, "server name or ID to back up; unscoped IDs discover managed projects (repeatable)")
+	command.Flags().BoolVar(&force, "force", false, "allow requested project-scoped servers outside configured selection")
 	return command
 }
 

@@ -66,6 +66,7 @@ func TestSnapshotAndProtectionFlags(t *testing.T) {
 		{[]string{"snapshots", "list"}, "all"},
 		{[]string{"snapshots", "delete"}, "force"},
 		{[]string{"backup"}, "server"},
+		{[]string{"backup"}, "force"},
 		{[]string{"prune"}, "force"},
 		{[]string{"replay", "rebuild"}, "force"},
 	}
@@ -84,6 +85,23 @@ func TestSnapshotAndProtectionFlags(t *testing.T) {
 	}
 	if deleteCommand.Flags().Lookup("force-unmanaged") != nil {
 		t.Fatal("snapshots delete still exposes removed --force-unmanaged flag")
+	}
+}
+
+func TestBackupForceRequiresProjectScopedServer(t *testing.T) {
+	for _, test := range []struct {
+		args     []string
+		contains string
+	}{
+		{args: []string{"backup", "--force"}, contains: "requires at least one --server"},
+		{args: []string{"backup", "--force", "--server", "108959890"}, contains: "requires --project or a PROJECT/SERVER target"},
+	} {
+		a := &app{out: io.Discard, errOut: io.Discard}
+		root := a.rootCommand()
+		root.SetArgs(test.args)
+		if err := root.Execute(); err == nil || !strings.Contains(err.Error(), test.contains) {
+			t.Fatalf("snapzner %s error = %v, want containing %q", strings.Join(test.args, " "), err, test.contains)
+		}
 	}
 }
 

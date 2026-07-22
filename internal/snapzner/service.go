@@ -86,6 +86,29 @@ func (s *Service) SelectBackupServers(ctx context.Context, project config.Projec
 	return s.selectBackupServers(ctx, project, requested)
 }
 
+// ResolveBackupServers resolves an exact per-run server list without applying
+// the persisted project's selector, includes, or excludes. It performs no
+// mutations and is used only for an explicitly forced, project-scoped backup.
+func (s *Service) ResolveBackupServers(ctx context.Context, requested []string) ([]*hcloud.Server, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.Timeout)
+	defer cancel()
+	s.progress("selecting servers", nil, 0, 0)
+	targets := make(map[int64]*hcloud.Server, len(requested))
+	for _, value := range requested {
+		server, err := s.Cloud.ResolveServerValue(ctx, value)
+		if err != nil {
+			return nil, fmt.Errorf("requested server %q: %w", value, err)
+		}
+		targets[server.ID] = server
+	}
+	servers := make([]*hcloud.Server, 0, len(targets))
+	for _, server := range targets {
+		servers = append(servers, server)
+	}
+	sortServers(servers)
+	return servers, nil
+}
+
 func (s *Service) selectBackupServers(ctx context.Context, project config.Project, requested []string) ([]*hcloud.Server, error) {
 	selected, err := s.Cloud.SelectedServers(ctx, s.Policy.LabelSelector, project.Include, project.Exclude)
 	if err != nil {

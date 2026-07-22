@@ -221,11 +221,23 @@ snapzner backup \
 `id:VALUE`. Unqualified names require exactly one `--project`; unqualified IDs
 without a project use the cross-project discovery behavior described above.
 When qualified values and `--project` are combined, their project sets must
-match exactly. The filter is per-run and does not modify configuration. Every
-requested project-scoped server must already belong to the project's effective
-configured selection; the flag cannot override an explicit exclusion.
+match exactly. The filter is per-run and does not modify configuration. Without
+`--force`, every requested project-scoped server must already belong to the
+project's effective configured selection, including its explicit exclusions.
 Snapzner validates all requested servers across all projects before creating
 any snapshot.
+
+Pass `--force` to back up explicitly requested, project-scoped servers even
+when they do not belong to the project's effective configured selection:
+
+```sh
+snapzner backup --project staging --server api-staging --force
+```
+
+Forced targets still resolve through the selected project's Hetzner
+credential. `--force` requires at least one `--server`; an unqualified numeric
+server ID also requires `--project` because cross-project discovery considers
+only configured selection.
 
 After a server's new snapshot becomes available, `backup` enforces that
 server's retention. With `--server`, automatic retention is likewise limited

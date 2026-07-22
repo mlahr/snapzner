@@ -114,6 +114,13 @@ func TestFilteredBackupValidatesEveryProjectBeforeMutation(t *testing.T) {
 			http.Error(w, "unexpected mutation", http.StatusInternalServerError)
 			return
 		}
+		if r.URL.Path == "/firewalls" {
+			writeBackupAPIJSON(t, w, map[string]any{
+				"firewalls": []schema.Firewall{},
+				"meta":      map[string]any{"pagination": map[string]any{"page": 1, "last_page": 1}},
+			})
+			return
+		}
 		if r.URL.Path != "/servers" {
 			http.NotFound(w, r)
 			return
@@ -153,13 +160,25 @@ func TestFilteredBackupValidatesEveryProjectBeforeMutation(t *testing.T) {
 	a := &app{configPath: path, version: "test", out: &output, errOut: &errors}
 	err := a.runFilteredBackup(
 		context.Background(), []string{"prod", "stage"},
-		map[string][]string{"prod": {"database"}, "stage": {"blocked"}}, nil,
+		map[string][]string{"prod": {"database"}, "stage": {"blocked"}}, false, nil,
 	)
 	if err == nil || !strings.Contains(errors.String(), "not selected by project configuration") {
 		t.Fatalf("error = %v, stderr = %q", err, errors.String())
 	}
 	if mutations != 0 {
 		t.Fatalf("created %d snapshots before preflight completed", mutations)
+	}
+
+	errors.Reset()
+	err = a.runFilteredBackup(
+		context.Background(), []string{"prod", "stage"},
+		map[string][]string{"prod": {"database"}, "stage": {"blocked"}}, true, nil,
+	)
+	if err == nil || strings.Contains(errors.String(), "not selected by project configuration") {
+		t.Fatalf("forced error = %v, stderr = %q", err, errors.String())
+	}
+	if mutations != 2 {
+		t.Fatalf("forced backup attempted %d snapshots, want 2", mutations)
 	}
 }
 

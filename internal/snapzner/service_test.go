@@ -74,6 +74,13 @@ func TestSelectBackupServersStrictlyIntersectsConfiguredSelection(t *testing.T) 
 	if _, err := svc.SelectBackupServers(context.Background(), project, []string{"web"}); err == nil || !strings.Contains(err.Error(), "not selected by project configuration") {
 		t.Fatalf("ineligible server error = %v", err)
 	}
+	forced, err := svc.ResolveBackupServers(context.Background(), []string{"web"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(forced) != 1 || forced[0].ID != 2 {
+		t.Fatalf("forced selection = %#v", forced)
+	}
 }
 
 func TestPruneCandidatesKeepsLatestPrefix(t *testing.T) {
